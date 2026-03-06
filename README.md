@@ -110,6 +110,10 @@ cargo run --example plot_complex_json
 cargo run --example plot_real_kernel_json
 ```
 
+## Author
+
+[Luke Lowery](https://lukelowry.github.io/) · [Google Scholar](https://scholar.google.com/citations?user=CTynuRMAAAAJ&hl=en)
+
 ## Related projects
 
 - [gspx](https://github.com/lukelowry/gsp-rust) — graph signal processing in Rust, uses `vecfit` for its fitting backend

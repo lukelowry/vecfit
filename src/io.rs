@@ -563,12 +563,12 @@ impl TryFrom<RealKernelJsonModel> for Model {
                 "real-kernel JSON direct term count must match n_functions".to_string(),
             ));
         }
-        if let Some(proportional_terms) = &json.proportional_terms
-            && proportional_terms.len() != channels
-        {
-            return Err(VecfitError::Serialization(
-                "real-kernel JSON proportional term count must match n_functions".to_string(),
-            ));
+        if let Some(proportional_terms) = &json.proportional_terms {
+            if proportional_terms.len() != channels {
+                return Err(VecfitError::Serialization(
+                    "real-kernel JSON proportional term count must match n_functions".to_string(),
+                ));
+            }
         }
 
         let mut residues = Vec::with_capacity(json.n_poles * channels);
