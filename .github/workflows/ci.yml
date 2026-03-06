@@ -27,8 +27,8 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --lib --tests --benches
-      - run: cargo test
+      - run: cargo test --lib --tests
+      - run: cargo test --doc
 
   clippy:
     name: Clippy
