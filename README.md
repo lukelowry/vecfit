@@ -88,6 +88,20 @@ and matrix fitting.
 | `real(&x)` | `f64` | `x` (real line) | kernel fitting, Laplace domain |
 | `complex(&s)` | `Complex64` | passthrough | full control |
 
+## Example output
+
+### Scalar fit (10 poles, RMSE 2.2e-4)
+
+![Scalar fit](examples/out/scalar_fit.png)
+
+### Vector fit (18 poles, 3 channels, RMSE 2.3e-4)
+
+![Vector fit](examples/out/vector_fit.png)
+
+### Matrix EMT fit (10 poles, 2x2, RMSE 1.9e-4)
+
+![Matrix EMT fit](examples/out/matrix_emt_fit.png)
+
 ## Examples
 
 ```bash
