@@ -1,0 +1,32 @@
+[package]
+name = "vecfit"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Pure-Rust relaxed vector fitting for scalar, vector, matrix, and tensor-valued frequency responses."
+repository = "https://github.com/lukelowry/vecfit"
+homepage = "https://github.com/lukelowry/vecfit"
+documentation = "https://docs.rs/vecfit"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["vector-fitting", "rational-approximation", "emt", "signal-processing", "numerics"]
+categories = ["algorithms", "mathematics", "science"]
+exclude = ["examples/out/*"]
+
+[dependencies]
+csv = "1.4"
+faer = "0.24"
+num-complex = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+approx = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+plotters = "0.3"
+proptest = "1.6"
+
+[[bench]]
+name = "fit"
+harness = false
