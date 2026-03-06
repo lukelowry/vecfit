@@ -5,14 +5,14 @@ use support::{
     ComparisonSeries, draw_comparison_report, example_data_path, example_output_path,
     write_summary_markdown,
 };
-use vecfit::{CsvSamples, FitOptions};
+use vecfit::{Csv, Options};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csv_path = example_data_path("scalar_transfer.csv");
-    let csv_samples = CsvSamples::from_path(&csv_path)?;
-    let model = csv_samples.fit(FitOptions::new().poles(8))?;
+    let csv_samples = Csv::from_path(&csv_path)?;
+    let model = csv_samples.fit(Options::new().poles(8))?;
     let reference_response = csv_samples.scalars()?;
-    let fitted_response = model.evaluate_scalar(csv_samples.axis())?;
+    let fitted_response = model.eval_scalar(csv_samples.axis())?;
 
     let plot_title = format!("Scalar CSV Fit ({} poles)", model.pole_count());
     let plot_path = example_output_path("scalar_csv_fit.png")?;

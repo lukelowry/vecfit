@@ -1,11 +1,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use num_complex::Complex64;
-use vecfit::{CsvSamples, FitOptions, Model};
+use vecfit::{Csv, Model, Options, hz};
 
 fn scalar_response(s: Complex64) -> Complex64 {
-    Complex64::new(0.03, 0.0)
-        + Complex64::new(3.2, 0.0) / (s + Complex64::new(25.0, 0.0))
-        + Complex64::new(1.0, 0.0) / (s + Complex64::new(250.0, 0.0))
+    0.03 + 3.2 / (s + 25.0) + 1.0 / (s + 250.0)
 }
 
 fn vector_response(s: Complex64, channels: usize) -> Vec<Complex64> {
@@ -14,9 +12,7 @@ fn vector_response(s: Complex64, channels: usize) -> Vec<Complex64> {
             let base = 15.0 + 12.0 * idx as f64;
             let slow = 0.03 + 0.005 * idx as f64;
             let fast = 0.4 + 0.03 * idx as f64;
-            Complex64::new(slow, 0.0)
-                + Complex64::new(1.6 + 0.1 * idx as f64, 0.0) / (s + Complex64::new(base, 0.0))
-                + Complex64::new(fast, 0.0) / (s + Complex64::new(10.0 * base, 0.0))
+            slow + (1.6 + 0.1 * idx as f64) / (s + base) + fast / (s + 10.0 * base)
         })
         .collect()
 }
@@ -32,9 +28,7 @@ fn matrix_response(s: Complex64, n: usize) -> Vec<Vec<Complex64>> {
                     } else {
                         -0.01 / (1.0 + (row + col) as f64)
                     };
-                    Complex64::new(dc, 0.0)
-                        + Complex64::new(1.2 / (1.0 + row as f64 + col as f64), 0.0)
-                            / (s + Complex64::new(base, 0.0))
+                    dc + (1.2 / (1.0 + row as f64 + col as f64)) / (s + base)
                 })
                 .collect()
         })
@@ -68,10 +62,10 @@ fn bench_fit_scalar_samples(c: &mut Criterion) {
             &freqs,
             |b, freqs| {
                 b.iter(|| {
-                    let model = Model::fit_hz(
-                        black_box(freqs),
+                    let model = Model::fit(
+                        hz(black_box(freqs)),
                         |hz| scalar_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz)),
-                        black_box(FitOptions::new().poles(4)),
+                        black_box(Options::new().poles(4)),
                     )
                     .expect("scalar fit should succeed");
                     black_box(model);
@@ -92,15 +86,15 @@ fn bench_fit_vector_channels(c: &mut Criterion) {
             &channels,
             |b, &channels| {
                 b.iter(|| {
-                    let model = Model::fit_hz(
-                        black_box(&freqs),
+                    let model = Model::fit(
+                        hz(black_box(&freqs)),
                         |hz| {
                             vector_response(
                                 Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz),
                                 channels,
                             )
                         },
-                        black_box(FitOptions::new().poles(6)),
+                        black_box(Options::new().poles(6)),
                     )
                     .expect("vector fit should succeed");
                     black_box(model);
@@ -121,15 +115,15 @@ fn bench_fit_matrix_sizes(c: &mut Criterion) {
             &size,
             |b, &size| {
                 b.iter(|| {
-                    let model = Model::fit_hz(
-                        black_box(&freqs),
+                    let model = Model::fit(
+                        hz(black_box(&freqs)),
                         |hz| {
                             matrix_response(
                                 Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz),
                                 size,
                             )
                         },
-                        black_box(FitOptions::new().poles(6)),
+                        black_box(Options::new().poles(6)),
                     )
                     .expect("matrix fit should succeed");
                     black_box(model);
@@ -140,13 +134,13 @@ fn bench_fit_matrix_sizes(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_evaluate_flat(c: &mut Criterion) {
-    let mut group = c.benchmark_group("evaluate_flat");
+fn bench_eval_flat(c: &mut Criterion) {
+    let mut group = c.benchmark_group("eval_flat");
     let freqs = logspace(1.0, 10_000.0, 1_200);
-    let model = Model::fit_hz(
-        &freqs,
+    let model = Model::fit(
+        hz(&freqs),
         |hz| vector_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz), 8),
-        FitOptions::new().poles(8),
+        Options::new().poles(8),
     )
     .expect("evaluation benchmark fit should succeed");
     let s = freqs
@@ -165,7 +159,7 @@ fn bench_evaluate_flat(c: &mut Criterion) {
             |b, dense| {
                 b.iter(|| {
                     let values = model
-                        .evaluate_flat(black_box(dense))
+                        .eval_flat(black_box(dense))
                         .expect("evaluation should succeed");
                     black_box(values);
                 });
@@ -184,8 +178,7 @@ fn bench_parse_csv(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(text.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, text| {
             b.iter(|| {
-                let parsed =
-                    CsvSamples::from_csv(black_box(text)).expect("csv parse should succeed");
+                let parsed = Csv::from_csv(black_box(text)).expect("csv parse should succeed");
                 black_box(parsed);
             });
         });
@@ -200,10 +193,10 @@ fn bench_fit_pole_count(c: &mut Criterion) {
         group.throughput(Throughput::Elements(freqs.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(poles), &poles, |b, &poles| {
             b.iter(|| {
-                let model = Model::fit_hz(
-                    black_box(&freqs),
+                let model = Model::fit(
+                    hz(black_box(&freqs)),
                     |hz| scalar_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz)),
-                    black_box(FitOptions::new().poles(poles)),
+                    black_box(Options::new().poles(poles)),
                 )
                 .expect("fit should succeed");
                 black_box(model);
@@ -216,10 +209,10 @@ fn bench_fit_pole_count(c: &mut Criterion) {
 fn bench_json_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("json_roundtrip");
     let freqs = logspace(1.0, 10_000.0, 400);
-    let model = Model::fit_hz(
-        &freqs,
+    let model = Model::fit(
+        hz(&freqs),
         |hz| vector_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz), 4),
-        FitOptions::new().poles(6),
+        Options::new().poles(6),
     )
     .expect("fit should succeed");
     let json = model.to_json().expect("export should work");
@@ -237,21 +230,16 @@ fn bench_discretize(c: &mut Criterion) {
     use vecfit::DiscretizationMethod;
     let mut group = c.benchmark_group("discretize");
     let freqs = logspace(1.0, 10_000.0, 400);
-    let model = Model::fit_hz(
-        &freqs,
+    let model = Model::fit(
+        hz(&freqs),
         |hz| {
             let s = Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz);
-            let h11 = Complex64::new(0.08, 0.0)
-                + Complex64::new(2.0, 0.0) / (s + Complex64::new(40.0, 0.0))
-                + Complex64::new(0.4, 0.0) / (s + Complex64::new(500.0, 0.0));
-            let h12 = Complex64::new(-0.03, 0.0)
-                + Complex64::new(0.7, 0.0) / (s + Complex64::new(80.0, 0.0));
-            let h22 = Complex64::new(0.06, 0.0)
-                + Complex64::new(1.6, 0.0) / (s + Complex64::new(30.0, 0.0))
-                + Complex64::new(0.3, 0.0) / (s + Complex64::new(300.0, 0.0));
+            let h11 = 0.08 + 2.0 / (s + 40.0) + 0.4 / (s + 500.0);
+            let h12 = -0.03 + 0.7 / (s + 80.0);
+            let h22 = 0.06 + 1.6 / (s + 30.0) + 0.3 / (s + 300.0);
             [[h11, h12], [h12, h22]]
         },
-        FitOptions::new().poles(6).real_only(true),
+        Options::new().poles(6).real_only(true),
     )
     .expect("fit should succeed");
     let ss = model.state_space().expect("state-space should work");
@@ -276,7 +264,7 @@ criterion_group!(
     bench_fit_vector_channels,
     bench_fit_matrix_sizes,
     bench_fit_pole_count,
-    bench_evaluate_flat,
+    bench_eval_flat,
     bench_parse_csv,
     bench_json_roundtrip,
     bench_discretize,

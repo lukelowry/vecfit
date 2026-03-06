@@ -18,6 +18,8 @@ pub enum VecfitError {
     Serialization(String),
     #[error("csv error: {0}")]
     Csv(String),
+    #[error("touchstone error: {0}")]
+    Touchstone(String),
 }
 
 pub type Result<T> = std::result::Result<T, VecfitError>;

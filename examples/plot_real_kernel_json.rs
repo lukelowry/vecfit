@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|value| Complex64::new(*value, 0.0))
         .collect::<Vec<_>>();
-    let evaluated_response = model.evaluate_vector(&sample_axis)?;
+    let evaluated_response = model.eval_vector(&sample_axis)?;
     let labels = ["K1", "K2"];
     let kernel_values = (0..labels.len())
         .map(|channel_idx| extract_channel(&evaluated_response, channel_idx))

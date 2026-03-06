@@ -157,7 +157,7 @@ impl Default for AutoPoles {
 
 /// Tuning knobs for relaxed vector fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FitOptions {
+pub struct Options {
     /// Number of poles to fit.
     pub poles: usize,
     /// User-supplied starting poles (must match `poles` in length).
@@ -184,9 +184,13 @@ pub struct FitOptions {
     pub restart_threshold: f64,
     /// Automatic pole-count search configuration.
     pub auto_poles: Option<AutoPoles>,
+    /// Record pole positions at each iteration for migration diagnostics.
+    pub track_pole_history: bool,
+    /// Memory layout for flattened output (default: RowMajor).
+    pub layout: Layout,
 }
 
-impl Default for FitOptions {
+impl Default for Options {
     fn default() -> Self {
         Self {
             poles: 6,
@@ -202,11 +206,13 @@ impl Default for FitOptions {
             max_restarts: 3,
             restart_threshold: 0.05,
             auto_poles: None,
+            track_pole_history: false,
+            layout: Layout::RowMajor,
         }
     }
 }
 
-impl FitOptions {
+impl Options {
     pub fn new() -> Self {
         Self::default()
     }
@@ -275,6 +281,50 @@ impl FitOptions {
         self.auto_poles = Some(auto_poles);
         self
     }
+
+    pub fn track_pole_history(mut self, track: bool) -> Self {
+        self.track_pole_history = track;
+        self
+    }
+
+    pub fn layout(mut self, layout: Layout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Shorthand for `Options::new().poles(n)`.
+    pub fn with_poles(n: usize) -> Self {
+        Self::new().poles(n)
+    }
+
+    /// Automatic pole-count search with default configuration.
+    pub fn auto() -> Self {
+        Self::new().auto_poles(AutoPoles::default())
+    }
+
+    /// Real-only fit with the given pole count.
+    pub fn real(n: usize) -> Self {
+        Self::new().poles(n).real_only(true)
+    }
+
+    /// Weighted fit with inverse-magnitude strategy.
+    pub fn weighted(n: usize) -> Self {
+        Self::new().poles(n).weight_strategy(WeightStrategy::InverseMagnitude)
+    }
+
+    /// Set convergence parameters (max iterations and tolerance).
+    pub fn convergence(mut self, max_iter: usize, tol: f64) -> Self {
+        self.max_iterations = max_iter;
+        self.tolerance = tol;
+        self
+    }
+
+    /// Set multi-start restart parameters.
+    pub fn restarts(mut self, max: usize, threshold: f64) -> Self {
+        self.max_restarts = max;
+        self.restart_threshold = threshold;
+        self
+    }
 }
 
 /// Summary statistics describing the last fit.
@@ -304,6 +354,13 @@ pub struct Report {
     pub real_sections_valid: bool,
     /// Number of multi-start restarts performed.
     pub restarts: usize,
+    /// Per-channel absolute RMSE. Length = channels.
+    pub channel_abs_rmse: Vec<f64>,
+    /// Per-channel relative RMSE. Length = channels.
+    pub channel_rel_rmse: Vec<f64>,
+    /// Pole snapshots at each iteration. Only populated when Options::track_pole_history is true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pole_history: Vec<Vec<[f64; 2]>>,
 }
 
 impl Default for Report {
@@ -321,7 +378,48 @@ impl Default for Report {
             stable: false,
             real_sections_valid: false,
             restarts: 0,
+            channel_abs_rmse: Vec::new(),
+            channel_rel_rmse: Vec::new(),
+            pole_history: Vec::new(),
         }
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "VecFit Report")?;
+        writeln!(f, "  converged:    {}", self.converged)?;
+        writeln!(f, "  iterations:   {}", self.iterations)?;
+        writeln!(f, "  restarts:     {}", self.restarts)?;
+        writeln!(f, "  abs RMSE:     {:.6e}", self.abs_rmse)?;
+        writeln!(f, "  rel RMSE:     {:.6e}", self.rel_rmse)?;
+        writeln!(f, "  max pole shift: {:.6e}", self.max_pole_shift)?;
+        writeln!(f, "  solver:       {:?}", self.solver_used)?;
+        writeln!(f, "  SVD fallback: {}", self.svd_fallback_used)?;
+        writeln!(f, "  weighted:     {}", self.weighted)?;
+        writeln!(f, "  stable:       {}", self.stable)?;
+        write!(f, "  real sections: {}", self.real_sections_valid)?;
+        if !self.channel_abs_rmse.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "  per-channel abs RMSE:")?;
+            for (i, rmse) in self.channel_abs_rmse.iter().enumerate() {
+                write!(f, "    ch {}: {:.6e}", i, rmse)?;
+                if i + 1 < self.channel_abs_rmse.len() { writeln!(f)?; }
+            }
+        }
+        if !self.channel_rel_rmse.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "  per-channel rel RMSE:")?;
+            for (i, rmse) in self.channel_rel_rmse.iter().enumerate() {
+                write!(f, "    ch {}: {:.6e}", i, rmse)?;
+                if i + 1 < self.channel_rel_rmse.len() { writeln!(f)?; }
+            }
+        }
+        if !self.pole_history.is_empty() {
+            writeln!(f)?;
+            write!(f, "  pole history: {} iterations tracked", self.pole_history.len())?;
+        }
+        Ok(())
     }
 }
 

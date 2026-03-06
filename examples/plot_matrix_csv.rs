@@ -5,14 +5,14 @@ use support::{
     ComparisonSeries, draw_comparison_report, example_data_path, example_output_path,
     extract_matrix_entry, write_summary_markdown,
 };
-use vecfit::{CsvSamples, FitOptions};
+use vecfit::{Csv, Options};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csv_path = example_data_path("matrix_admittance_2x2.csv");
-    let csv_samples = CsvSamples::from_path(&csv_path)?.matrix(2, 2)?;
-    let model = csv_samples.fit(FitOptions::new().poles(10))?;
+    let csv_samples = Csv::from_path(&csv_path)?.matrix(2, 2)?;
+    let model = csv_samples.fit(Options::new().poles(10))?;
     let reference_response = csv_samples.matrices()?;
-    let fitted_response = model.evaluate_matrix(csv_samples.axis())?;
+    let fitted_response = model.eval_matrix(csv_samples.axis())?;
 
     let entries = [
         ("Y11", 0usize, 0usize),

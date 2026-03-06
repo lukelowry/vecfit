@@ -80,6 +80,20 @@ impl Shape {
             ))),
         }
     }
+
+    /// Infer shape from channel count: scalar for 1, square matrix if
+    /// `channels` is a perfect square, otherwise vector.
+    pub fn infer_square(channels: usize) -> Result<Self> {
+        if channels == 1 {
+            return Ok(Self::scalar());
+        }
+        let sqrt = (channels as f64).sqrt() as usize;
+        if sqrt * sqrt == channels {
+            Self::matrix(sqrt, sqrt)
+        } else {
+            Self::vector(channels)
+        }
+    }
 }
 
 impl From<()> for Shape {

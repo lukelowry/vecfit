@@ -5,26 +5,24 @@ use num_complex::Complex64;
 use support::{
     ComparisonSeries, draw_comparison_report, example_output_path, logspace, write_summary_markdown,
 };
-use vecfit::{FitOptions, Model};
+use vecfit::{Model, Options, c, hz};
 
 /// Characteristic admittance-like transfer function with multiple resonances.
 fn target_response(s: Complex64) -> Complex64 {
-    // DC / high-frequency asymptote
-    let d = Complex64::new(0.005, 0.0);
     // Slow real pole (low-frequency roll-off)
-    let r0 = Complex64::new(0.06, 0.0);
-    let p0 = Complex64::new(-8.0, 0.0);
+    let r0 = 0.06;
+    let p0 = -8.0;
     // Resonance at ~30 Hz (β ≈ 188)
-    let r1 = Complex64::new(0.12, -0.08);
-    let p1 = Complex64::new(-15.0, 188.0);
+    let r1 = c(0.12, -0.08);
+    let p1 = c(-15.0, 188.0);
     // Resonance at ~300 Hz (β ≈ 1885)
-    let r2 = Complex64::new(0.06, -0.10);
-    let p2 = Complex64::new(-60.0, 1885.0);
+    let r2 = c(0.06, -0.10);
+    let p2 = c(-60.0, 1885.0);
     // Resonance at ~2500 Hz (β ≈ 15708)
-    let r3 = Complex64::new(0.03, -0.04);
-    let p3 = Complex64::new(-400.0, 15708.0);
+    let r3 = c(0.03, -0.04);
+    let p3 = c(-400.0, 15708.0);
 
-    d + r0 / (s - p0)
+    0.005 + r0 / (s - p0)
         + r1 / (s - p1)
         + r1.conj() / (s - p1.conj())
         + r2 / (s - p2)
@@ -40,16 +38,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|hz| Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz))
         .collect::<Vec<_>>();
 
-    let model = Model::fit_hz(
-        &frequency_hz,
+    let model = Model::fit(
+        hz(&frequency_hz),
         |hz| target_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz)),
-        FitOptions::new().poles(10),
+        Options::new().poles(10),
     )?;
     let reference_response = sample_axis
         .iter()
         .map(|&sample| target_response(sample))
         .collect::<Vec<_>>();
-    let fitted_response = model.evaluate_scalar(&sample_axis)?;
+    let fitted_response = model.eval_scalar(&sample_axis)?;
 
     let plot_title = format!("Scalar Fit ({} poles)", model.pole_count());
     let plot_path = example_output_path("scalar_fit.png")?;

@@ -6,33 +6,30 @@ use support::{
     ComparisonSeries, draw_comparison_report, example_output_path, extract_channel, logspace,
     write_summary_markdown,
 };
-use vecfit::{FitOptions, Model};
+use vecfit::{Model, Options, c, hz};
 
 /// 3-phase characteristic admittance with different resonance patterns per phase.
 fn vector_response(s: Complex64) -> Vec<Complex64> {
     // Phase A: dominant resonance at ~50 Hz, secondary at ~500 Hz
-    let ya = Complex64::new(0.004, 0.0)
-        + Complex64::new(0.05, 0.0) / (s - Complex64::new(-10.0, 0.0))
-        + Complex64::new(0.15, -0.10) / (s - Complex64::new(-20.0, 314.0))
-        + Complex64::new(0.15, 0.10) / (s - Complex64::new(-20.0, -314.0))
-        + Complex64::new(0.05, -0.08) / (s - Complex64::new(-80.0, 3142.0))
-        + Complex64::new(0.05, 0.08) / (s - Complex64::new(-80.0, -3142.0));
+    let ya = 0.004 + 0.05 / (s + 10.0)
+        + c(0.15, -0.10) / (s - c(-20.0, 314.0))
+        + c(0.15, 0.10) / (s - c(-20.0, -314.0))
+        + c(0.05, -0.08) / (s - c(-80.0, 3142.0))
+        + c(0.05, 0.08) / (s - c(-80.0, -3142.0));
 
     // Phase B: dominant resonance at ~120 Hz, secondary at ~1500 Hz
-    let yb = Complex64::new(0.003, 0.0)
-        + Complex64::new(0.04, 0.0) / (s - Complex64::new(-12.0, 0.0))
-        + Complex64::new(0.10, -0.12) / (s - Complex64::new(-35.0, 754.0))
-        + Complex64::new(0.10, 0.12) / (s - Complex64::new(-35.0, -754.0))
-        + Complex64::new(0.04, -0.05) / (s - Complex64::new(-150.0, 9425.0))
-        + Complex64::new(0.04, 0.05) / (s - Complex64::new(-150.0, -9425.0));
+    let yb = 0.003 + 0.04 / (s + 12.0)
+        + c(0.10, -0.12) / (s - c(-35.0, 754.0))
+        + c(0.10, 0.12) / (s - c(-35.0, -754.0))
+        + c(0.04, -0.05) / (s - c(-150.0, 9425.0))
+        + c(0.04, 0.05) / (s - c(-150.0, -9425.0));
 
     // Phase C: broad resonance at ~80 Hz, sharp resonance at ~800 Hz
-    let yc = Complex64::new(0.005, 0.0)
-        + Complex64::new(0.06, 0.0) / (s - Complex64::new(-6.0, 0.0))
-        + Complex64::new(0.08, -0.06) / (s - Complex64::new(-50.0, 503.0))
-        + Complex64::new(0.08, 0.06) / (s - Complex64::new(-50.0, -503.0))
-        + Complex64::new(0.07, -0.09) / (s - Complex64::new(-30.0, 5027.0))
-        + Complex64::new(0.07, 0.09) / (s - Complex64::new(-30.0, -5027.0));
+    let yc = 0.005 + 0.06 / (s + 6.0)
+        + c(0.08, -0.06) / (s - c(-50.0, 503.0))
+        + c(0.08, 0.06) / (s - c(-50.0, -503.0))
+        + c(0.07, -0.09) / (s - c(-30.0, 5027.0))
+        + c(0.07, 0.09) / (s - c(-30.0, -5027.0));
 
     vec![ya, yb, yc]
 }
@@ -43,16 +40,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|hz| Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz))
         .collect::<Vec<_>>();
-    let model = Model::fit_hz(
-        &frequency_hz,
+    let model = Model::fit(
+        hz(&frequency_hz),
         |hz| vector_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz)),
-        FitOptions::new().poles(18),
+        Options::new().poles(18),
     )?;
     let reference_response = sample_axis
         .iter()
         .map(|&sample| vector_response(sample))
         .collect::<Vec<_>>();
-    let fitted_response = model.evaluate_vector(&sample_axis)?;
+    let fitted_response = model.eval_vector(&sample_axis)?;
 
     let labels = ["Ch 1", "Ch 2", "Ch 3"];
     let reference_channels = (0..labels.len())

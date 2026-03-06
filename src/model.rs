@@ -1,13 +1,12 @@
-use std::f64::consts::PI;
-
 use faer::Mat;
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
+use crate::axis::{AsComplexAxis, Axis, IntoAxis};
 use crate::emt::{RealSectionModel, StateSpaceModel, supports_real_sections};
 use crate::error::{Result, VecfitError};
 use crate::fit::{
-    AutoPoles, FitOptions, ProblemRef, Report, SampleMatrix, SampleMatrixRef, WeightStrategy,
+    AutoPoles, Options, ProblemRef, Report, SampleMatrix, SampleMatrixRef, WeightStrategy,
     apply_sample_weights, compute_inverse_magnitude_weights, initial_poles,
     matrix_from_row_major_slice, pole_basis_matrix, solve_least_squares_scaled, validate_weights,
 };
@@ -61,6 +60,15 @@ pub struct Model {
     pub(crate) report: Report,
 }
 
+/// Per-channel error metrics returned by [`Model::channel_errors`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelErrors {
+    /// Absolute RMSE per channel.
+    pub abs_rmse: Vec<f64>,
+    /// Relative RMSE per channel.
+    pub rel_rmse: Vec<f64>,
+}
+
 impl Model {
     /// Build a model from explicit coefficients and metadata.
     pub fn from_parts(parts: ModelParts) -> Result<Self> {
@@ -78,15 +86,55 @@ impl Model {
         Ok(model)
     }
 
-    /// Fit a model from scalar, vector, matrix, or tensor-like samples on a complex axis.
-    pub fn fit<R, F>(axis: &[Complex64], response_for: F, options: FitOptions) -> Result<Self>
+    /// Fit a model from sample points and a response closure.
+    ///
+    /// The axis wrapper determines how sample points map to the complex plane.
+    /// Use [`hz`](crate::hz), [`rad`](crate::rad), [`real`](crate::real),
+    /// or [`complex`](crate::complex) to construct the axis.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use vecfit::{Model, Options, hz};
+    ///
+    /// let freq: Vec<f64> = (1..=60).map(|k| k as f64).collect();
+    /// let model = Model::fit(
+    ///     hz(&freq),
+    ///     |f| 1.0 / (1.0 + 2.0 * std::f64::consts::PI * f),
+    ///     Options::new().poles(4),
+    /// )?;
+    /// # Ok::<(), vecfit::VecfitError>(())
+    /// ```
+    pub fn fit<A, R, F>(axis: Axis<'_, A>, response_for: F, options: Options) -> Result<Self>
     where
+        A: IntoAxis,
         R: IntoResponse,
-        F: Fn(Complex64) -> R,
+        F: Fn(A::Point) -> R,
     {
-        let collected = collect_response_batch(axis, |sample| response_for(*sample))?;
-        let problem =
-            build_fit_problem(axis, &collected.values, &collected.shape, collected.layout)?;
+        let complex_axis = axis.to_complex();
+        let collected = collect_response_batch(axis.points, |sample| response_for(*sample))?;
+        let problem = build_fit_problem(
+            &complex_axis,
+            &collected.values,
+            &collected.shape,
+            collected.layout,
+        )?;
+        Self::fit_problem(problem, options)
+    }
+
+    /// Fit from pre-computed flat sample data with an axis wrapper.
+    ///
+    /// Use this when you already have the complex response values as a flat buffer
+    /// rather than a closure.
+    pub fn fit_samples<A: IntoAxis>(
+        axis: Axis<'_, A>,
+        flat_values: &[Complex64],
+        shape: Shape,
+        options: Options,
+    ) -> Result<Self> {
+        let complex_axis = axis.to_complex();
+        let layout = options.layout;
+        let problem = build_fit_problem(&complex_axis, flat_values, &shape, layout)?;
         Self::fit_problem(problem, options)
     }
 
@@ -94,7 +142,7 @@ impl Model {
     ///
     /// This is the main entry point that handles auto-poles, multi-start, and
     /// weight strategy before delegating to the core fitting loop.
-    pub fn fit_problem(problem: ProblemRef<'_>, options: FitOptions) -> Result<Self> {
+    pub fn fit_problem(problem: ProblemRef<'_>, options: Options) -> Result<Self> {
         problem.validate()?;
 
         if let Some(ref auto) = options.auto_poles {
@@ -107,7 +155,7 @@ impl Model {
     /// Auto-poles: try increasing pole counts until target RMSE is met.
     fn fit_problem_auto(
         problem: ProblemRef<'_>,
-        base_options: FitOptions,
+        base_options: Options,
         auto: AutoPoles,
     ) -> Result<Self> {
         let min = auto.min_poles.max(1);
@@ -129,7 +177,7 @@ impl Model {
                 }
                 best_model = Some(model);
             }
-            n += 2; // add one conjugate pair at a time
+            n += if base_options.real_only { 1 } else { 2 };
         }
 
         best_model.ok_or_else(|| {
@@ -138,7 +186,7 @@ impl Model {
     }
 
     /// Core fitting loop with multi-start support.
-    fn fit_problem_core(problem: ProblemRef<'_>, options: FitOptions) -> Result<Self> {
+    fn fit_problem_core(problem: ProblemRef<'_>, options: Options) -> Result<Self> {
         if options.poles == 0 {
             return Err(VecfitError::InvalidInput(
                 "poles must be at least 1".to_string(),
@@ -210,110 +258,19 @@ impl Model {
                     Ok(candidate) => {
                         if candidate.report.rel_rmse < best.report.rel_rmse {
                             best = candidate;
-                            best.report.restarts = trial;
                             if best.report.rel_rmse <= options.restart_threshold {
+                                best.report.restarts = trial;
                                 break;
                             }
                         }
                     }
                     Err(_) => continue,
                 }
+                best.report.restarts = trial;
             }
         }
 
         Ok(best)
-    }
-
-    /// Fit from flattened samples plus explicit shape metadata.
-    pub fn fit_samples(
-        axis: &[Complex64],
-        flat_values: &[Complex64],
-        shape: Shape,
-        layout: Layout,
-        options: FitOptions,
-    ) -> Result<Self> {
-        let problem = build_fit_problem(axis, flat_values, &shape, layout)?;
-        Self::fit_problem(problem, options)
-    }
-
-    /// Fit from a real-valued sample axis mapped onto the real line.
-    pub fn fit_real<R, F>(
-        sample_points: &[f64],
-        response_for: F,
-        options: FitOptions,
-    ) -> Result<Self>
-    where
-        R: IntoResponse,
-        F: Fn(f64) -> R,
-    {
-        Self::fit_mapped(
-            sample_points,
-            |value| Complex64::new(*value, 0.0),
-            |value| response_for(*value),
-            options,
-        )
-    }
-
-    /// Fit from any user-defined sample axis that can be mapped to `Complex64`.
-    pub fn fit_mapped<X, R, M, F>(
-        sample_points: &[X],
-        map_axis: M,
-        response_for: F,
-        options: FitOptions,
-    ) -> Result<Self>
-    where
-        R: IntoResponse,
-        M: Fn(&X) -> Complex64,
-        F: Fn(&X) -> R,
-    {
-        let axis = sample_points.iter().map(map_axis).collect::<Vec<_>>();
-        let collected = collect_response_batch(sample_points, response_for)?;
-        let problem =
-            build_fit_problem(&axis, &collected.values, &collected.shape, collected.layout)?;
-        Self::fit_problem(problem, options)
-    }
-
-    /// Fit on an imaginary-axis frequency grid specified in hertz.
-    pub fn fit_hz<R, F>(frequency_hz: &[f64], response_for: F, options: FitOptions) -> Result<Self>
-    where
-        R: IntoResponse,
-        F: Fn(f64) -> R,
-    {
-        Self::fit_mapped(
-            frequency_hz,
-            |hz| Complex64::new(0.0, 2.0 * PI * *hz),
-            |hz| response_for(*hz),
-            options,
-        )
-    }
-
-    /// Fit on an imaginary-axis frequency grid specified in radians per second.
-    pub fn fit_rad<R, F>(omega: &[f64], response_for: F, options: FitOptions) -> Result<Self>
-    where
-        R: IntoResponse,
-        F: Fn(f64) -> R,
-    {
-        Self::fit_mapped(
-            omega,
-            |value| Complex64::new(0.0, *value),
-            |value| response_for(*value),
-            options,
-        )
-    }
-
-    /// Fit flattened imaginary-axis samples where the frequency axis is specified in hertz.
-    pub fn fit_hz_samples(
-        frequency_hz: &[f64],
-        flat_values: &[Complex64],
-        shape: Shape,
-        layout: Layout,
-        options: FitOptions,
-    ) -> Result<Self> {
-        let axis = frequency_hz
-            .iter()
-            .map(|hz| Complex64::new(0.0, 2.0 * PI * hz))
-            .collect::<Vec<_>>();
-        Self::fit_samples(&axis, flat_values, shape, layout, options)
     }
 
     /// Validate that the model coefficients satisfy the invariants assumed by evaluation and export paths.
@@ -416,8 +373,232 @@ impl Model {
     }
 
     /// Evaluate the model into a flat `(sample, channel)` matrix.
-    pub fn evaluate_flat(&self, axis: &[Complex64]) -> Result<SampleMatrix> {
+    ///
+    /// Accepts `&[Complex64]`, `&Vec<Complex64>`, or any typed axis wrapper
+    /// (`hz(&freq)`, `rad(&omega)`, `complex(&s)`, etc.).
+    pub fn eval_flat(&self, axis: impl AsComplexAxis) -> Result<SampleMatrix> {
         self.validate()?;
+        let a = axis.as_complex_axis();
+        self.eval_flat_raw(&a)
+    }
+
+    /// Evaluate the model and reconstruct each sample into its recorded output shape.
+    pub fn eval(&self, axis: impl AsComplexAxis) -> Result<Vec<ResponseSample<Complex64>>> {
+        let a = axis.as_complex_axis();
+        let flat = self.eval_flat_raw(&a)?;
+        (0..flat.samples)
+            .map(|row| ResponseSample::new(flat.row(row).to_vec(), self.shape.clone(), self.layout))
+            .collect()
+    }
+
+    /// Evaluate the model as scalar samples.
+    pub fn eval_scalar(&self, axis: impl AsComplexAxis) -> Result<Vec<Complex64>> {
+        self.eval(axis)?
+            .into_iter()
+            .map(ResponseSample::into_scalar)
+            .collect()
+    }
+
+    /// Evaluate the model as vector samples.
+    pub fn eval_vector(&self, axis: impl AsComplexAxis) -> Result<Vec<Vec<Complex64>>> {
+        self.eval(axis)?
+            .into_iter()
+            .map(ResponseSample::into_vector)
+            .collect()
+    }
+
+    /// Evaluate the model as matrix samples.
+    pub fn eval_matrix(&self, axis: impl AsComplexAxis) -> Result<Vec<Vec<Vec<Complex64>>>> {
+        self.eval(axis)?
+            .into_iter()
+            .map(ResponseSample::into_matrix)
+            .collect()
+    }
+
+    /// Evaluate the model and return per-channel magnitude in decibels.
+    ///
+    /// Returns `Vec<Vec<f64>>` where the outer index is channel and the inner
+    /// index is frequency point: `result[channel][sample]`.
+    pub fn magnitude_db(&self, axis: impl AsComplexAxis) -> Result<Vec<Vec<f64>>> {
+        let a = axis.as_complex_axis();
+        let flat = self.eval_flat_raw(&a)?;
+        let mut result = vec![Vec::with_capacity(flat.samples); self.channels];
+        for sample_idx in 0..flat.samples {
+            for (ch, ch_vec) in result.iter_mut().enumerate() {
+                let val = flat.values[sample_idx * self.channels + ch];
+                ch_vec.push(20.0 * val.norm().log10());
+            }
+        }
+        Ok(result)
+    }
+
+    /// Evaluate the model and return per-channel phase in degrees.
+    ///
+    /// Returns `Vec<Vec<f64>>` where the outer index is channel and the inner
+    /// index is frequency point: `result[channel][sample]`.
+    pub fn phase_deg(&self, axis: impl AsComplexAxis) -> Result<Vec<Vec<f64>>> {
+        let a = axis.as_complex_axis();
+        let flat = self.eval_flat_raw(&a)?;
+        let mut result = vec![Vec::with_capacity(flat.samples); self.channels];
+        for sample_idx in 0..flat.samples {
+            for (ch, ch_vec) in result.iter_mut().enumerate() {
+                let val = flat.values[sample_idx * self.channels + ch];
+                ch_vec.push(val.arg().to_degrees());
+            }
+        }
+        Ok(result)
+    }
+
+    /// Return the residue for a specific pole and channel.
+    ///
+    /// Indexed as `residues[pole_idx * channels + channel_idx]`.
+    pub fn residue(&self, pole_idx: usize, channel_idx: usize) -> Complex64 {
+        self.residues[pole_idx * self.channels + channel_idx]
+    }
+
+    /// Return whether all poles have non-positive real parts (stable model).
+    pub fn is_stable(&self) -> bool {
+        self.report.stable
+    }
+
+    /// Export the model as real first-order and second-order sections.
+    pub fn real_sections(&self) -> Result<RealSectionModel> {
+        RealSectionModel::from_model(self)
+    }
+
+    /// Export the model as a continuous-time state-space realization.
+    pub fn state_space(&self) -> Result<StateSpaceModel> {
+        StateSpaceModel::from_model(self)
+    }
+
+    /// Per-sample error magnitude between the model and reference data.
+    ///
+    /// Returns a vector of length `axis.len()` where each entry is the
+    /// RMS error across channels at that frequency point.
+    pub fn frequency_error(
+        &self,
+        axis: impl AsComplexAxis,
+        reference_values: &[Complex64],
+    ) -> Result<Vec<f64>> {
+        let a = axis.as_complex_axis();
+        let predicted = self.eval_flat_raw(&a)?;
+        let channels = self.channels;
+        let mut errors = Vec::with_capacity(a.len());
+        for sample_idx in 0..a.len() {
+            let mut sample_error_sq = 0.0;
+            for ch in 0..channels {
+                let idx = sample_idx * channels + ch;
+                let diff = reference_values[idx] - predicted.values[idx];
+                sample_error_sq += diff.norm_sqr();
+            }
+            errors.push((sample_error_sq / channels as f64).sqrt());
+        }
+        Ok(errors)
+    }
+
+    /// Per-sample, per-channel complex error between the model and reference data.
+    ///
+    /// Returns a `SampleMatrix` where each element is `reference - predicted`.
+    pub fn frequency_error_matrix(
+        &self,
+        axis: impl AsComplexAxis,
+        reference_values: &[Complex64],
+    ) -> Result<SampleMatrix> {
+        let a = axis.as_complex_axis();
+        let predicted = self.eval_flat_raw(&a)?;
+        let errors: Vec<Complex64> = reference_values
+            .iter()
+            .zip(predicted.values.iter())
+            .map(|(r, p)| r - p)
+            .collect();
+        SampleMatrix::new(errors, a.len(), self.channels)
+    }
+
+    /// Per-channel RMSE recomputed against the given reference data.
+    ///
+    /// Useful for evaluating fit quality on a validation axis different
+    /// from the one used during fitting.
+    pub fn channel_errors(
+        &self,
+        axis: impl AsComplexAxis,
+        reference_values: &[Complex64],
+    ) -> Result<ChannelErrors> {
+        let a = axis.as_complex_axis();
+        let predicted = self.eval_flat_raw(&a)?;
+        let channels = self.channels;
+        let samples = a.len();
+        let mut error_energy = vec![0.0f64; channels];
+        let mut signal_energy = vec![0.0f64; channels];
+        for sample_idx in 0..samples {
+            for ch in 0..channels {
+                let idx = sample_idx * channels + ch;
+                let diff = reference_values[idx] - predicted.values[idx];
+                error_energy[ch] += diff.norm_sqr();
+                signal_energy[ch] += reference_values[idx].norm_sqr();
+            }
+        }
+        let n = samples.max(1) as f64;
+        Ok(ChannelErrors {
+            abs_rmse: error_energy.iter().map(|e| (e / n).sqrt()).collect(),
+            rel_rmse: error_energy
+                .iter()
+                .zip(signal_energy.iter())
+                .map(|(e, s)| (e / n).sqrt() / ((s / n).sqrt().max(1e-15)))
+                .collect(),
+        })
+    }
+
+    /// Retrieve pole history as Complex64 values.
+    ///
+    /// Returns `None` if `Options::track_pole_history` was not enabled.
+    /// Each inner vector corresponds to one iteration of the relocation loop.
+    pub fn pole_history(&self) -> Option<Vec<Vec<Complex64>>> {
+        if self.report.pole_history.is_empty() {
+            return None;
+        }
+        Some(
+            self.report
+                .pole_history
+                .iter()
+                .map(|snapshot| {
+                    snapshot
+                        .iter()
+                        .map(|&[re, im]| Complex64::new(re, im))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    /// Return a human-readable summary of the fitted model.
+    pub fn summary(&self) -> String {
+        format!(
+            "Model: {} poles, {} channels, shape {:?}\n\
+             RMSE: {:.3e} (abs), {:.3e} (rel)\n\
+             Converged: {} ({} iterations, {} restarts)\n\
+             Stable: {}, Real-section export: {}",
+            self.pole_count(),
+            self.channels(),
+            self.shape().dims(),
+            self.abs_rmse(),
+            self.rel_rmse(),
+            self.report().converged,
+            self.report().iterations,
+            self.report().restarts,
+            self.report().stable,
+            self.report().real_sections_valid,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private evaluation core
+// ---------------------------------------------------------------------------
+
+impl Model {
+    /// Core evaluation on a raw `&[Complex64]` axis. Used by all public eval
+    /// methods and internal error computation.
+    fn eval_flat_raw(&self, axis: &[Complex64]) -> Result<SampleMatrix> {
         let pole_response = Mat::from_fn(axis.len(), self.poles.len(), |sample_idx, pole_idx| {
             Complex64::new(1.0, 0.0) / (axis[sample_idx] - self.poles[pole_idx])
         });
@@ -436,48 +617,6 @@ impl Model {
         }
         SampleMatrix::new(values, axis.len(), self.channels)
     }
-
-    /// Evaluate the model and reconstruct each sample into its recorded output shape.
-    pub fn evaluate(&self, axis: &[Complex64]) -> Result<Vec<ResponseSample<Complex64>>> {
-        let flat = self.evaluate_flat(axis)?;
-        (0..flat.samples)
-            .map(|row| ResponseSample::new(flat.row(row).to_vec(), self.shape.clone(), self.layout))
-            .collect()
-    }
-
-    /// Evaluate the model as scalar samples.
-    pub fn evaluate_scalar(&self, axis: &[Complex64]) -> Result<Vec<Complex64>> {
-        self.evaluate(axis)?
-            .into_iter()
-            .map(ResponseSample::into_scalar)
-            .collect()
-    }
-
-    /// Evaluate the model as vector samples.
-    pub fn evaluate_vector(&self, axis: &[Complex64]) -> Result<Vec<Vec<Complex64>>> {
-        self.evaluate(axis)?
-            .into_iter()
-            .map(ResponseSample::into_vector)
-            .collect()
-    }
-
-    /// Evaluate the model as matrix samples.
-    pub fn evaluate_matrix(&self, axis: &[Complex64]) -> Result<Vec<Vec<Vec<Complex64>>>> {
-        self.evaluate(axis)?
-            .into_iter()
-            .map(ResponseSample::into_matrix)
-            .collect()
-    }
-
-    /// Export the model as real first-order and second-order sections.
-    pub fn real_sections(&self) -> Result<RealSectionModel> {
-        RealSectionModel::from_model(self)
-    }
-
-    /// Export the model as a continuous-time state-space realization.
-    pub fn state_space(&self) -> Result<StateSpaceModel> {
-        StateSpaceModel::from_model(self)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +628,7 @@ fn run_single_fit(
     sample_matrix: &Mat<Complex64>,
     starting_poles: &[Complex64],
     weights: Option<&[f64]>,
-    options: &FitOptions,
+    options: &Options,
     problem: ProblemRef<'_>,
 ) -> Result<Model> {
     let channels = sample_matrix.ncols();
@@ -503,6 +642,11 @@ fn run_single_fit(
     for iteration in 0..options.max_iterations {
         let previous_poles = poles.clone();
         poles = relocate_poles(axis, sample_matrix, &poles, weights, options)?;
+        if options.track_pole_history {
+            report.pole_history.push(
+                poles.iter().map(|p| [p.re, p.im]).collect()
+            );
+        }
         report.iterations = iteration + 1;
         let relative_shift = poles
             .iter()
@@ -589,7 +733,7 @@ fn relocate_poles(
     sample_matrix: &Mat<Complex64>,
     poles: &[Complex64],
     weights: Option<&[f64]>,
-    options: &FitOptions,
+    options: &Options,
 ) -> Result<Vec<Complex64>> {
     let samples = sample_matrix.nrows();
     let channels = sample_matrix.ncols();
@@ -813,18 +957,43 @@ fn update_model_report(
     axis: &[Complex64],
     reference_values: &[Complex64],
 ) -> Result<()> {
-    let predicted = model.evaluate_flat(axis)?;
-    let mut error_energy = 0.0;
-    let mut signal_energy = 0.0;
-    for (predicted_value, reference_value) in predicted.values.iter().zip(reference_values.iter()) {
-        let error = reference_value - predicted_value;
-        error_energy += error.norm_sqr();
-        signal_energy += reference_value.norm_sqr();
+    let predicted = model.eval_flat_raw(axis)?;
+    let channels = model.channels;
+    let samples = axis.len();
+
+    // Per-channel accumulators
+    let mut channel_error_energy = vec![0.0f64; channels];
+    let mut channel_signal_energy = vec![0.0f64; channels];
+
+    for sample_idx in 0..samples {
+        for ch in 0..channels {
+            let idx = sample_idx * channels + ch;
+            let error = reference_values[idx] - predicted.values[idx];
+            channel_error_energy[ch] += error.norm_sqr();
+            channel_signal_energy[ch] += reference_values[idx].norm_sqr();
+        }
     }
-    let sample_count = reference_values.len().max(1) as f64;
-    model.report.abs_rmse = (error_energy / sample_count).sqrt();
+
+    // Aggregate
+    let total_error: f64 = channel_error_energy.iter().sum();
+    let total_signal: f64 = channel_signal_energy.iter().sum();
+    let total_count = reference_values.len().max(1) as f64;
+    model.report.abs_rmse = (total_error / total_count).sqrt();
     model.report.rel_rmse =
-        model.report.abs_rmse / ((signal_energy / sample_count).sqrt().max(1e-15));
+        model.report.abs_rmse / ((total_signal / total_count).sqrt().max(1e-15));
+
+    // Per-channel
+    let samples_f64 = samples.max(1) as f64;
+    model.report.channel_abs_rmse = channel_error_energy
+        .iter()
+        .map(|e| (e / samples_f64).sqrt())
+        .collect();
+    model.report.channel_rel_rmse = channel_error_energy
+        .iter()
+        .zip(channel_signal_energy.iter())
+        .map(|(e, s)| (e / samples_f64).sqrt() / ((s / samples_f64).sqrt().max(1e-15)))
+        .collect();
+
     model.report.stable = model
         .poles
         .iter()

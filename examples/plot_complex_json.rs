@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|hz| Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz))
         .collect::<Vec<_>>();
-    let evaluated_response = model.evaluate_vector(&sample_axis)?;
+    let evaluated_response = model.eval_vector(&sample_axis)?;
     let labels = ["Ch 1", "Ch 2"];
     let channel_values = (0..labels.len())
         .map(|channel_idx| extract_channel(&evaluated_response, channel_idx))

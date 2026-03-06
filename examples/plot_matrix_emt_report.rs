@@ -6,48 +6,45 @@ use support::{
     ComparisonSeries, draw_comparison_report, example_output_path, extract_matrix_entry, logspace,
     write_summary_markdown,
 };
-use vecfit::{FitOptions, Model};
+use vecfit::{Model, Options, c, hz};
 
 /// 2-port network admittance with resonances and cross-coupling.
 fn matrix_response(s: Complex64) -> [[Complex64; 2]; 2] {
     // Shared poles for coupling
-    let p_real = Complex64::new(-25.0, 0.0);
+    let p_real = -25.0;
     // Resonance at ~60 Hz
-    let p1 = Complex64::new(-18.0, 377.0);
+    let p1 = c(-18.0, 377.0);
     // Resonance at ~400 Hz
-    let p2 = Complex64::new(-50.0, 2513.0);
+    let p2 = c(-50.0, 2513.0);
     // Resonance at ~2000 Hz
-    let p3 = Complex64::new(-200.0, 12566.0);
+    let p3 = c(-200.0, 12566.0);
 
     // Y11: strong self-admittance with all resonances
-    let y11 = Complex64::new(0.010, 0.0)
-        + Complex64::new(0.15, 0.0) / (s - p_real)
-        + Complex64::new(0.20, -0.12) / (s - p1)
-        + Complex64::new(0.20, 0.12) / (s - p1.conj())
-        + Complex64::new(0.08, -0.10) / (s - p2)
-        + Complex64::new(0.08, 0.10) / (s - p2.conj())
-        + Complex64::new(0.03, -0.02) / (s - p3)
-        + Complex64::new(0.03, 0.02) / (s - p3.conj());
+    let y11 = 0.010 + 0.15 / (s - p_real)
+        + c(0.20, -0.12) / (s - p1)
+        + c(0.20, 0.12) / (s - p1.conj())
+        + c(0.08, -0.10) / (s - p2)
+        + c(0.08, 0.10) / (s - p2.conj())
+        + c(0.03, -0.02) / (s - p3)
+        + c(0.03, 0.02) / (s - p3.conj());
 
     // Y12 = Y21: weaker mutual admittance (coupling), opposite sign at resonances
-    let y12 = Complex64::new(-0.002, 0.0)
-        + Complex64::new(-0.04, 0.0) / (s - p_real)
-        + Complex64::new(-0.05, 0.03) / (s - p1)
-        + Complex64::new(-0.05, -0.03) / (s - p1.conj())
-        + Complex64::new(-0.02, 0.025) / (s - p2)
-        + Complex64::new(-0.02, -0.025) / (s - p2.conj())
-        + Complex64::new(-0.008, 0.005) / (s - p3)
-        + Complex64::new(-0.008, -0.005) / (s - p3.conj());
+    let y12 = -0.002 - 0.04 / (s - p_real)
+        + c(-0.05, 0.03) / (s - p1)
+        + c(-0.05, -0.03) / (s - p1.conj())
+        + c(-0.02, 0.025) / (s - p2)
+        + c(-0.02, -0.025) / (s - p2.conj())
+        + c(-0.008, 0.005) / (s - p3)
+        + c(-0.008, -0.005) / (s - p3.conj());
 
     // Y22: different amplitude profile but same resonance structure
-    let y22 = Complex64::new(0.008, 0.0)
-        + Complex64::new(0.12, 0.0) / (s - p_real)
-        + Complex64::new(0.14, -0.09) / (s - p2)
-        + Complex64::new(0.14, 0.09) / (s - p2.conj())
-        + Complex64::new(0.10, -0.07) / (s - p1)
-        + Complex64::new(0.10, 0.07) / (s - p1.conj())
-        + Complex64::new(0.04, -0.03) / (s - p3)
-        + Complex64::new(0.04, 0.03) / (s - p3.conj());
+    let y22 = 0.008 + 0.12 / (s - p_real)
+        + c(0.14, -0.09) / (s - p2)
+        + c(0.14, 0.09) / (s - p2.conj())
+        + c(0.10, -0.07) / (s - p1)
+        + c(0.10, 0.07) / (s - p1.conj())
+        + c(0.04, -0.03) / (s - p3)
+        + c(0.04, 0.03) / (s - p3.conj());
 
     [[y11, y12], [y12, y22]]
 }
@@ -58,9 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|hz| Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz))
         .collect::<Vec<_>>();
-    let options = FitOptions::new().poles(10);
-    let model = Model::fit_hz(
-        &frequency_hz,
+    let options = Options::new().poles(10);
+    let model = Model::fit(
+        hz(&frequency_hz),
         |hz| matrix_response(Complex64::new(0.0, 2.0 * std::f64::consts::PI * hz)),
         options,
     )?;
@@ -69,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|&sample| matrix_response(sample).map(|row| row.to_vec()).to_vec())
         .collect::<Vec<_>>();
-    let fitted_response = model.evaluate_matrix(&sample_axis)?;
+    let fitted_response = model.eval_matrix(&sample_axis)?;
 
     let entries = [
         ("Y11", 0usize, 0usize),

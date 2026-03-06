@@ -52,7 +52,7 @@ pub struct ResponseSeries<'a> {
     pub values: &'a [Complex64],
 }
 
-pub fn project_root() -> PathBuf {
+fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -92,11 +92,11 @@ pub fn logspace(start: f64, stop: f64, n: usize) -> Vec<f64> {
     }
 }
 
-pub fn magnitude(values: &[Complex64]) -> Vec<f64> {
+fn magnitude(values: &[Complex64]) -> Vec<f64> {
     values.iter().map(|value| value.norm()).collect()
 }
 
-pub fn phase_deg(values: &[Complex64]) -> Vec<f64> {
+fn phase_deg(values: &[Complex64]) -> Vec<f64> {
     let mut phases: Vec<f64> = values
         .iter()
         .map(|value| value.arg().to_degrees())
@@ -105,7 +105,6 @@ pub fn phase_deg(values: &[Complex64]) -> Vec<f64> {
     phases
 }
 
-/// Unwrap phase values so that jumps larger than 180 degrees are corrected.
 fn unwrap_phase_deg(phases: &mut [f64]) {
     for i in 1..phases.len() {
         let mut delta = phases[i] - phases[i - 1];
@@ -119,7 +118,7 @@ fn unwrap_phase_deg(phases: &mut [f64]) {
     }
 }
 
-pub fn relative_error(target: &[Complex64], fitted: &[Complex64]) -> Vec<f64> {
+fn relative_error(target: &[Complex64], fitted: &[Complex64]) -> Vec<f64> {
     target
         .iter()
         .zip(fitted.iter())
@@ -539,17 +538,3 @@ fn draw_panels(
     Ok(())
 }
 
-pub fn markdown_table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    let mut out = String::new();
-    out.push('|');
-    out.push_str(&headers.join("|"));
-    out.push_str("|\n|");
-    out.push_str(&headers.iter().map(|_| "---").collect::<Vec<_>>().join("|"));
-    out.push_str("|\n");
-    for row in rows {
-        out.push('|');
-        out.push_str(&row.join("|"));
-        out.push_str("|\n");
-    }
-    out
-}

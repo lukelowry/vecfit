@@ -7,7 +7,7 @@ use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VecfitError};
-use crate::fit::{FitOptions, Report, SampleMatrix};
+use crate::fit::{Options, Report, SampleMatrix};
 use crate::model::Model;
 use crate::shape::{Layout, ResponseSample, Shape};
 
@@ -61,9 +61,21 @@ pub struct ComplexModelJson {
     pub iterations: usize,
 }
 
-/// Parsed EMT CSV input with both the original frequency axis and mapped imaginary-axis samples.
+/// Detected column format for CSV parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsvFormat {
+    /// Magnitude/phase pairs: `|Y1|, ang_Y1, |Y2|, ang_Y2, ...`
+    MagnitudePhase,
+    /// Real/imaginary pairs: `re_Y1, im_Y1, re_Y2, im_Y2, ...`
+    RealImag,
+}
+
+/// Format-agnostic parsed frequency-domain samples ready for fitting.
+///
+/// All format parsers ([`Csv`], [`Touchstone`](crate::Touchstone), etc.) produce
+/// this type or delegate to it via `Deref`.
 #[derive(Debug, Clone)]
-pub struct CsvSamples {
+pub struct ParsedSamples {
     frequency_hz: Vec<f64>,
     axis: Vec<Complex64>,
     samples: SampleMatrix,
@@ -71,63 +83,43 @@ pub struct CsvSamples {
     layout: Layout,
 }
 
-impl CsvSamples {
-    /// Parse EMT magnitude/phase CSV text into complex samples.
-    pub fn from_csv(csv_text: &str) -> Result<Self> {
-        Self::from_reader(csv_text.as_bytes())
-    }
-
-    /// Parse EMT magnitude/phase CSV data from a filesystem path.
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let csv_text = std::fs::read_to_string(path)?;
-        Self::from_csv(&csv_text)
-    }
-
-    /// Parse EMT magnitude/phase CSV data from any reader.
-    pub fn from_reader<R: Read>(reader: R) -> Result<Self> {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(reader);
-        let headers = reader
-            .headers()
-            .map_err(|err| VecfitError::Csv(err.to_string()))?
-            .clone();
-        let channels = count_magnitude_phase_pairs(&headers)?;
-
-        let mut frequency_hz = Vec::new();
-        let mut axis = Vec::new();
-        let mut sample_values = Vec::new();
-        for record in reader.records() {
-            let record = record?;
-            let frequency = parse_frequency_hz_column(&record)?;
-            frequency_hz.push(frequency);
-            axis.push(Complex64::new(0.0, 2.0 * std::f64::consts::PI * frequency));
-
-            for channel_idx in 0..channels {
-                sample_values.push(parse_complex_channel_sample(&record, channel_idx)?);
-            }
+impl ParsedSamples {
+    /// Build from pre-computed components.
+    pub fn new(
+        frequency_hz: Vec<f64>,
+        axis: Vec<Complex64>,
+        samples: SampleMatrix,
+        shape: Shape,
+        layout: Layout,
+    ) -> Result<Self> {
+        if frequency_hz.len() != axis.len() {
+            return Err(VecfitError::Dimension(format!(
+                "frequency_hz length {} does not match axis length {}",
+                frequency_hz.len(),
+                axis.len()
+            )));
         }
-
-        let shape = if channels == 1 {
-            Shape::scalar()
-        } else {
-            Shape::vector(channels)?
-        };
-
+        if samples.samples != axis.len() {
+            return Err(VecfitError::Dimension(format!(
+                "sample matrix rows {} do not match axis length {}",
+                samples.samples,
+                axis.len()
+            )));
+        }
         Ok(Self {
             frequency_hz,
-            samples: SampleMatrix::new(sample_values, axis.len(), channels)?,
             axis,
+            samples,
             shape,
-            layout: Layout::RowMajor,
+            layout,
         })
     }
 
-    /// Override the inferred output shape after parsing.
+    /// Override the inferred output shape.
     pub fn with_shape(mut self, shape: Shape) -> Result<Self> {
         if shape.channels() != self.samples.channels {
             return Err(VecfitError::Dimension(format!(
-                "shape {:?} expects {} channels but CSV data has {}",
+                "shape {:?} expects {} channels but data has {}",
                 shape.dims(),
                 shape.channels(),
                 self.samples.channels
@@ -157,7 +149,7 @@ impl CsvSamples {
         self.samples.samples
     }
 
-    /// Return whether the parsed CSV contains no samples.
+    /// Return whether the parsed data contains no samples.
     pub fn is_empty(&self) -> bool {
         self.samples.samples == 0
     }
@@ -243,15 +235,176 @@ impl CsvSamples {
         self
     }
 
-    /// Fit a model directly from the parsed CSV data.
-    pub fn fit(&self, options: FitOptions) -> Result<Model> {
+    /// Compare a fitted model against this parsed data and return per-channel errors.
+    pub fn compare(&self, model: &Model) -> Result<crate::model::ChannelErrors> {
+        model.channel_errors(&self.axis as &[Complex64], &self.samples.values)
+    }
+
+    /// Fit a model directly from the parsed data.
+    pub fn fit(&self, options: Options) -> Result<Model> {
         Model::fit_samples(
-            &self.axis,
+            crate::axis::complex(&self.axis),
             &self.samples.values,
             self.shape.clone(),
-            self.layout,
             options,
         )
+    }
+}
+
+/// Parsed CSV input with both the original frequency axis and mapped imaginary-axis samples.
+///
+/// Supports two column formats (auto-detected from headers):
+/// - **Magnitude/phase**: `freq_Hz, |Y1|, ang_Y1, ...` (angle in degrees)
+/// - **Rectangular**: `freq_Hz, re_Y1, im_Y1, ...`
+///
+/// Also supports tab-separated, semicolon-separated, and custom delimiters
+/// via [`from_tsv`](Csv::from_tsv), [`from_ssv`](Csv::from_ssv), and
+/// [`from_delimited`](Csv::from_delimited).
+#[derive(Debug, Clone)]
+pub struct Csv {
+    inner: ParsedSamples,
+}
+
+impl std::ops::Deref for Csv {
+    type Target = ParsedSamples;
+
+    fn deref(&self) -> &ParsedSamples {
+        &self.inner
+    }
+}
+
+impl Csv {
+    /// Convert into the format-agnostic parsed samples.
+    pub fn into_parsed(self) -> ParsedSamples {
+        self.inner
+    }
+
+    /// Parse CSV text into complex samples. Format is auto-detected from headers.
+    pub fn from_csv(csv_text: &str) -> Result<Self> {
+        Self::from_reader_inner(csv_text.as_bytes(), b',')
+    }
+
+    /// Parse CSV data from a filesystem path. Format is auto-detected from headers.
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let csv_text = std::fs::read_to_string(path)?;
+        Self::from_csv(&csv_text)
+    }
+
+    /// Parse CSV data from any reader. Format is auto-detected from headers.
+    pub fn from_reader<R: Read>(reader: R) -> Result<Self> {
+        Self::from_reader_inner(reader, b',')
+    }
+
+    /// Parse tab-separated values.
+    pub fn from_tsv(text: &str) -> Result<Self> {
+        Self::from_delimited(text, b'\t')
+    }
+
+    /// Parse semicolon-separated values.
+    pub fn from_ssv(text: &str) -> Result<Self> {
+        Self::from_delimited(text, b';')
+    }
+
+    /// Parse delimited text with a custom field separator.
+    pub fn from_delimited(text: &str, delimiter: u8) -> Result<Self> {
+        Self::from_reader_inner(text.as_bytes(), delimiter)
+    }
+
+    /// Parse delimited data from a filesystem path with a custom field separator.
+    pub fn from_path_delimited<P: AsRef<Path>>(path: P, delimiter: u8) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        Self::from_delimited(&text, delimiter)
+    }
+
+    /// Parse and fit in one call.
+    pub fn fit_csv(csv_text: &str, options: Options) -> Result<Model> {
+        Self::from_csv(csv_text)?.fit(options)
+    }
+
+    /// Parse from a file path and fit in one call.
+    pub fn fit_path<P: AsRef<Path>>(path: P, options: Options) -> Result<Model> {
+        Self::from_path(path)?.fit(options)
+    }
+
+    fn from_reader_inner<R: Read>(reader: R, delimiter: u8) -> Result<Self> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .delimiter(delimiter)
+            .from_reader(reader);
+        let headers = reader
+            .headers()
+            .map_err(|err| VecfitError::Csv(err.to_string()))?
+            .clone();
+        let (format, channels) = detect_csv_format(&headers)?;
+
+        let mut frequency_hz = Vec::new();
+        let mut axis = Vec::new();
+        let mut sample_values = Vec::new();
+        for record in reader.records() {
+            let record = record?;
+            let frequency = parse_frequency_hz_column(&record)?;
+            frequency_hz.push(frequency);
+            axis.push(Complex64::new(0.0, 2.0 * std::f64::consts::PI * frequency));
+
+            for channel_idx in 0..channels {
+                let value = match format {
+                    CsvFormat::MagnitudePhase => parse_mag_phase_column(&record, channel_idx)?,
+                    CsvFormat::RealImag => parse_real_imag_column(&record, channel_idx)?,
+                };
+                sample_values.push(value);
+            }
+        }
+
+        let shape = if channels == 1 {
+            Shape::scalar()
+        } else {
+            Shape::vector(channels)?
+        };
+
+        Ok(Self {
+            inner: ParsedSamples {
+                frequency_hz,
+                samples: SampleMatrix::new(sample_values, axis.len(), channels)?,
+                axis,
+                shape,
+                layout: Layout::RowMajor,
+            },
+        })
+    }
+
+    /// Override the inferred output shape after parsing.
+    pub fn with_shape(mut self, shape: Shape) -> Result<Self> {
+        self.inner = self.inner.with_shape(shape)?;
+        Ok(self)
+    }
+
+    /// Interpret the parsed samples as scalars.
+    pub fn scalar(self) -> Result<Self> {
+        self.with_shape(Shape::scalar())
+    }
+
+    /// Interpret the parsed samples as a vector of the given length.
+    pub fn vector(self, len: usize) -> Result<Self> {
+        self.with_shape(Shape::vector(len)?)
+    }
+
+    /// Interpret the parsed samples as a matrix with the given dimensions.
+    pub fn matrix(self, rows: usize, cols: usize) -> Result<Self> {
+        self.with_shape(Shape::matrix(rows, cols)?)
+    }
+
+    /// Interpret the parsed samples as a tensor with the given dimensions.
+    pub fn tensor<I>(self, dims: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.with_shape(Shape::tensor(dims)?)
+    }
+
+    /// Override the flattened layout used when reconstructing samples.
+    pub fn with_layout(mut self, layout: Layout) -> Self {
+        self.inner.layout = layout;
+        self
     }
 }
 
@@ -293,7 +446,7 @@ impl Model {
     }
 }
 
-impl FromStr for CsvSamples {
+impl FromStr for Csv {
     type Err = VecfitError;
 
     fn from_str(s: &str) -> Result<Self> {
@@ -518,18 +671,30 @@ impl TryFrom<(&Model, Option<String>)> for RealKernelJsonModel {
     }
 }
 
-fn count_magnitude_phase_pairs(headers: &StringRecord) -> Result<usize> {
+/// Detect CSV format from headers. Returns the format and channel count.
+fn detect_csv_format(headers: &StringRecord) -> Result<(CsvFormat, usize)> {
     if headers.len() < 3 {
         return Err(VecfitError::Csv(
-            "expected at least one frequency column and one magnitude/phase pair".to_string(),
+            "expected at least a frequency column and one column pair".to_string(),
         ));
     }
     if (headers.len() - 1) % 2 != 0 {
         return Err(VecfitError::Csv(
-            "magnitude/phase columns must appear in complete pairs".to_string(),
+            "data columns must appear in complete pairs".to_string(),
         ));
     }
-    Ok((headers.len() - 1) / 2)
+    let channels = (headers.len() - 1) / 2;
+
+    // Check the first data column to determine format
+    let first_col = headers.get(1).unwrap_or("").trim().to_lowercase();
+    let format = if first_col.starts_with("re") {
+        CsvFormat::RealImag
+    } else {
+        // Default to magnitude/phase (covers |Y|, mag_, etc.)
+        CsvFormat::MagnitudePhase
+    };
+
+    Ok((format, channels))
 }
 
 fn parse_frequency_hz_column(record: &StringRecord) -> Result<f64> {
@@ -541,7 +706,7 @@ fn parse_frequency_hz_column(record: &StringRecord) -> Result<f64> {
         .map_err(Into::into)
 }
 
-fn parse_complex_channel_sample(record: &StringRecord, channel_idx: usize) -> Result<Complex64> {
+fn parse_mag_phase_column(record: &StringRecord, channel_idx: usize) -> Result<Complex64> {
     let magnitude = record
         .get(1 + channel_idx * 2)
         .ok_or_else(|| VecfitError::Csv("missing magnitude column".to_string()))?
@@ -552,12 +717,25 @@ fn parse_complex_channel_sample(record: &StringRecord, channel_idx: usize) -> Re
         .ok_or_else(|| VecfitError::Csv("missing phase column".to_string()))?
         .trim()
         .parse::<f64>()?;
-    Ok(complex_from_polar_degrees(magnitude, phase_deg))
+    let phase_rad = phase_deg.to_radians();
+    Ok(Complex64::new(
+        magnitude * phase_rad.cos(),
+        magnitude * phase_rad.sin(),
+    ))
 }
 
-fn complex_from_polar_degrees(magnitude: f64, phase_deg: f64) -> Complex64 {
-    let phase_rad = phase_deg.to_radians();
-    Complex64::new(magnitude * phase_rad.cos(), magnitude * phase_rad.sin())
+fn parse_real_imag_column(record: &StringRecord, channel_idx: usize) -> Result<Complex64> {
+    let re = record
+        .get(1 + channel_idx * 2)
+        .ok_or_else(|| VecfitError::Csv("missing real column".to_string()))?
+        .trim()
+        .parse::<f64>()?;
+    let im = record
+        .get(2 + channel_idx * 2)
+        .ok_or_else(|| VecfitError::Csv("missing imaginary column".to_string()))?
+        .trim()
+        .parse::<f64>()?;
+    Ok(Complex64::new(re, im))
 }
 
 fn complex_from_pair(value: [f64; 2]) -> Complex64 {
