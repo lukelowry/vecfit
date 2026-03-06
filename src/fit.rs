@@ -309,7 +309,9 @@ impl Options {
 
     /// Weighted fit with inverse-magnitude strategy.
     pub fn weighted(n: usize) -> Self {
-        Self::new().poles(n).weight_strategy(WeightStrategy::InverseMagnitude)
+        Self::new()
+            .poles(n)
+            .weight_strategy(WeightStrategy::InverseMagnitude)
     }
 
     /// Set convergence parameters (max iterations and tolerance).
@@ -404,7 +406,9 @@ impl std::fmt::Display for Report {
             writeln!(f, "  per-channel abs RMSE:")?;
             for (i, rmse) in self.channel_abs_rmse.iter().enumerate() {
                 write!(f, "    ch {}: {:.6e}", i, rmse)?;
-                if i + 1 < self.channel_abs_rmse.len() { writeln!(f)?; }
+                if i + 1 < self.channel_abs_rmse.len() {
+                    writeln!(f)?;
+                }
             }
         }
         if !self.channel_rel_rmse.is_empty() {
@@ -412,12 +416,18 @@ impl std::fmt::Display for Report {
             writeln!(f, "  per-channel rel RMSE:")?;
             for (i, rmse) in self.channel_rel_rmse.iter().enumerate() {
                 write!(f, "    ch {}: {:.6e}", i, rmse)?;
-                if i + 1 < self.channel_rel_rmse.len() { writeln!(f)?; }
+                if i + 1 < self.channel_rel_rmse.len() {
+                    writeln!(f)?;
+                }
             }
         }
         if !self.pole_history.is_empty() {
             writeln!(f)?;
-            write!(f, "  pole history: {} iterations tracked", self.pole_history.len())?;
+            write!(
+                f,
+                "  pole history: {} iterations tracked",
+                self.pole_history.len()
+            )?;
         }
         Ok(())
     }

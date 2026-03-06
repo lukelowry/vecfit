@@ -537,4 +537,3 @@ fn draw_panels(
     root.present()?;
     Ok(())
 }
-

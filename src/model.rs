@@ -643,9 +643,9 @@ fn run_single_fit(
         let previous_poles = poles.clone();
         poles = relocate_poles(axis, sample_matrix, &poles, weights, options)?;
         if options.track_pole_history {
-            report.pole_history.push(
-                poles.iter().map(|p| [p.re, p.im]).collect()
-            );
+            report
+                .pole_history
+                .push(poles.iter().map(|p| [p.re, p.im]).collect());
         }
         report.iterations = iteration + 1;
         let relative_shift = poles

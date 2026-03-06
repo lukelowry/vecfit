@@ -81,10 +81,7 @@ impl IntoAxis for RadPerSec {
     type Point = f64;
 
     fn into_axis(points: &[f64]) -> Vec<Complex64> {
-        points
-            .iter()
-            .map(|w| Complex64::new(0.0, *w))
-            .collect()
+        points.iter().map(|w| Complex64::new(0.0, *w)).collect()
     }
 }
 
@@ -95,10 +92,7 @@ impl IntoAxis for RealAxis {
     type Point = f64;
 
     fn into_axis(points: &[f64]) -> Vec<Complex64> {
-        points
-            .iter()
-            .map(|x| Complex64::new(*x, 0.0))
-            .collect()
+        points.iter().map(|x| Complex64::new(*x, 0.0)).collect()
     }
 }
 

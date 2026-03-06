@@ -11,21 +11,24 @@ use vecfit::{Model, Options, c, hz};
 /// 3-phase characteristic admittance with different resonance patterns per phase.
 fn vector_response(s: Complex64) -> Vec<Complex64> {
     // Phase A: dominant resonance at ~50 Hz, secondary at ~500 Hz
-    let ya = 0.004 + 0.05 / (s + 10.0)
+    let ya = 0.004
+        + 0.05 / (s + 10.0)
         + c(0.15, -0.10) / (s - c(-20.0, 314.0))
         + c(0.15, 0.10) / (s - c(-20.0, -314.0))
         + c(0.05, -0.08) / (s - c(-80.0, 3142.0))
         + c(0.05, 0.08) / (s - c(-80.0, -3142.0));
 
     // Phase B: dominant resonance at ~120 Hz, secondary at ~1500 Hz
-    let yb = 0.003 + 0.04 / (s + 12.0)
+    let yb = 0.003
+        + 0.04 / (s + 12.0)
         + c(0.10, -0.12) / (s - c(-35.0, 754.0))
         + c(0.10, 0.12) / (s - c(-35.0, -754.0))
         + c(0.04, -0.05) / (s - c(-150.0, 9425.0))
         + c(0.04, 0.05) / (s - c(-150.0, -9425.0));
 
     // Phase C: broad resonance at ~80 Hz, sharp resonance at ~800 Hz
-    let yc = 0.005 + 0.06 / (s + 6.0)
+    let yc = 0.005
+        + 0.06 / (s + 6.0)
         + c(0.08, -0.06) / (s - c(-50.0, 503.0))
         + c(0.08, 0.06) / (s - c(-50.0, -503.0))
         + c(0.07, -0.09) / (s - c(-30.0, 5027.0))

@@ -106,7 +106,9 @@ pub use crate::fit::{
     AutoPoles, Options, ProblemRef, Report, SampleMatrix, SampleMatrixRef, SolverPolicy,
     SolverUsed, WeightStrategy,
 };
-pub use crate::io::{ComplexModelJson, Csv, ParsedSamples, RealKernelJsonModel, RealKernelPoleJson};
+pub use crate::io::{
+    ComplexModelJson, Csv, ParsedSamples, RealKernelJsonModel, RealKernelPoleJson,
+};
 pub use crate::model::{ChannelErrors, Model, ModelParts};
 pub use crate::shape::{FlatResponse, IntoResponse, Layout, ResponseSample, ResponseScalar, Shape};
 pub use crate::touchstone::{

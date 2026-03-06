@@ -104,9 +104,7 @@ impl FromStr for DataFormat {
             "RI" => Ok(Self::RI),
             "MA" => Ok(Self::MA),
             "DB" => Ok(Self::DB),
-            _ => Err(VecfitError::Touchstone(format!(
-                "unknown data format: {s}"
-            ))),
+            _ => Err(VecfitError::Touchstone(format!("unknown data format: {s}"))),
         }
     }
 }
@@ -236,7 +234,7 @@ struct FrequencyPoint {
 }
 
 /// Strip comments, find the option line, and collect data lines.
-fn preprocess(text: &str) -> Result<(TouchstoneOptions, Vec<String>) > {
+fn preprocess(text: &str) -> Result<(TouchstoneOptions, Vec<String>)> {
     let mut options = TouchstoneOptions::default();
     let mut data_lines = Vec::new();
     let mut found_option_line = false;
@@ -420,10 +418,7 @@ fn build_touchstone(
 
     for pt in points {
         frequency_hz.push(pt.freq_hz);
-        axis.push(Complex64::new(
-            0.0,
-            2.0 * std::f64::consts::PI * pt.freq_hz,
-        ));
+        axis.push(Complex64::new(0.0, 2.0 * std::f64::consts::PI * pt.freq_hz));
         values.extend_from_slice(&pt.params);
     }
 

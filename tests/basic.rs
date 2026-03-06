@@ -1,9 +1,8 @@
 use approx::assert_relative_eq;
 use num_complex::Complex64;
 use vecfit::{
-    complex, hz, rad, real, ChannelStateSpace, Csv, DiscretizationMethod, FlatResponse,
-    IntoResponse, Layout, Model, ModelParts, Options, Shape, StateSpaceModel,
-    VecfitError,
+    ChannelStateSpace, Csv, DiscretizationMethod, FlatResponse, IntoResponse, Layout, Model,
+    ModelParts, Options, Shape, StateSpaceModel, VecfitError, complex, hz, rad, real,
 };
 
 fn build_samples(n: usize) -> Vec<Complex64> {
@@ -73,7 +72,7 @@ fn scalar_fit_accuracy_regression() {
     let sample_axis = build_samples(200);
     let model = Model::fit(
         complex(&sample_axis),
-        |s| reference_scalar(s),
+        reference_scalar,
         Options::new().poles(4),
     )
     .expect("fit should succeed");
@@ -149,16 +148,20 @@ fn rad_axis_fit_matches_hz_axis() {
     )
     .expect("hz fit should succeed");
 
-    let rad_model = Model::fit(
-        rad(&omega),
-        |w| 1.0 / (1.0 + w),
-        Options::new().poles(2),
-    )
-    .expect("rad fit should succeed");
+    let rad_model = Model::fit(rad(&omega), |w| 1.0 / (1.0 + w), Options::new().poles(2))
+        .expect("rad fit should succeed");
 
     // Both should achieve good accuracy
-    assert!(hz_model.abs_rmse() < 0.1, "hz RMSE = {:.3e}", hz_model.abs_rmse());
-    assert!(rad_model.abs_rmse() < 0.1, "rad RMSE = {:.3e}", rad_model.abs_rmse());
+    assert!(
+        hz_model.abs_rmse() < 0.1,
+        "hz RMSE = {:.3e}",
+        hz_model.abs_rmse()
+    );
+    assert!(
+        rad_model.abs_rmse() < 0.1,
+        "rad RMSE = {:.3e}",
+        rad_model.abs_rmse()
+    );
 }
 
 #[test]
@@ -219,7 +222,9 @@ fn shape_inference_scalars_arrays_vecs() {
     let s = (1.0f64).into_response().expect("scalar");
     assert!(s.shape.is_scalar());
 
-    let s = Complex64::new(1.0, 2.0).into_response().expect("complex scalar");
+    let s = Complex64::new(1.0, 2.0)
+        .into_response()
+        .expect("complex scalar");
     assert!(s.shape.is_scalar());
 
     // Fixed-size array → vector
@@ -231,7 +236,9 @@ fn shape_inference_scalars_arrays_vecs() {
     assert_eq!(v.shape.expect_vector().unwrap(), 2);
 
     // Nested array → matrix
-    let m = [[1.0, 2.0], [3.0, 4.0]].into_response().expect("array matrix");
+    let m = [[1.0, 2.0], [3.0, 4.0]]
+        .into_response()
+        .expect("array matrix");
     assert_eq!(m.shape.expect_matrix().unwrap(), (2, 2));
 
     // Vec<Vec> → matrix
@@ -283,7 +290,11 @@ fn csv_magnitude_phase_format() {
     assert_relative_eq!(scalars[0].re, expected_re, epsilon = 1e-10);
     assert_relative_eq!(scalars[0].im, expected_im, epsilon = 1e-10);
     // Frequency maps to j*2*pi*f
-    assert_relative_eq!(parsed.axis()[0].im, 2.0 * std::f64::consts::PI, epsilon = 1e-12);
+    assert_relative_eq!(
+        parsed.axis()[0].im,
+        2.0 * std::f64::consts::PI,
+        epsilon = 1e-12
+    );
 }
 
 #[test]
@@ -491,7 +502,7 @@ fn channel_errors_against_known_reference() {
     let sample_axis = build_samples(100);
     let model = Model::fit(
         complex(&sample_axis),
-        |s| reference_scalar(s),
+        reference_scalar,
         Options::new().poles(4),
     )
     .expect("fit");
@@ -707,9 +718,7 @@ fn fit_rejects_negative_weights() {
     let err = Model::fit(
         complex(&axis),
         |s| 1.0 / (s + 3.0) + 0.1,
-        Options::new()
-            .poles(2)
-            .weights(vec![-1.0; axis.len()]),
+        Options::new().poles(2).weights(vec![-1.0; axis.len()]),
     )
     .expect_err("negative weights should be rejected");
     assert!(matches!(err, VecfitError::InvalidInput(_)));
@@ -764,7 +773,7 @@ fn invalid_state_space_returns_error() {
         shape: Shape::scalar(),
         layout: Layout::RowMajor,
         channels: vec![ChannelStateSpace {
-            a: vec![1.0],       // 1 element but n_states=2 needs 4
+            a: vec![1.0], // 1 element but n_states=2 needs 4
             n_states: 2,
             b: vec![1.0, 1.0],
             c: vec![1.0, 1.0],

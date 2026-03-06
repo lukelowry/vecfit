@@ -20,7 +20,8 @@ fn matrix_response(s: Complex64) -> [[Complex64; 2]; 2] {
     let p3 = c(-200.0, 12566.0);
 
     // Y11: strong self-admittance with all resonances
-    let y11 = 0.010 + 0.15 / (s - p_real)
+    let y11 = 0.010
+        + 0.15 / (s - p_real)
         + c(0.20, -0.12) / (s - p1)
         + c(0.20, 0.12) / (s - p1.conj())
         + c(0.08, -0.10) / (s - p2)
@@ -38,7 +39,8 @@ fn matrix_response(s: Complex64) -> [[Complex64; 2]; 2] {
         + c(-0.008, -0.005) / (s - p3.conj());
 
     // Y22: different amplitude profile but same resonance structure
-    let y22 = 0.008 + 0.12 / (s - p_real)
+    let y22 = 0.008
+        + 0.12 / (s - p_real)
         + c(0.14, -0.09) / (s - p2)
         + c(0.14, 0.09) / (s - p2.conj())
         + c(0.10, -0.07) / (s - p1)

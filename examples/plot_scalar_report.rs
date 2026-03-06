@@ -22,7 +22,8 @@ fn target_response(s: Complex64) -> Complex64 {
     let r3 = c(0.03, -0.04);
     let p3 = c(-400.0, 15708.0);
 
-    0.005 + r0 / (s - p0)
+    0.005
+        + r0 / (s - p0)
         + r1 / (s - p1)
         + r1.conj() / (s - p1.conj())
         + r2 / (s - p2)
