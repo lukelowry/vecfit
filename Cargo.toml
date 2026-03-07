@@ -11,7 +11,7 @@ readme = "README.md"
 rust-version = "1.85"
 keywords = ["vector-fitting", "rational-approximation", "emt", "signal-processing", "numerics"]
 categories = ["algorithms", "mathematics", "science"]
-exclude = ["examples/out/*"]
+exclude = ["examples/out/*", "CLAUDE.md", ".github/"]
 
 [dependencies]
 csv = "1.4"

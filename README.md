@@ -1,10 +1,12 @@
 # vecfit
 
-[![crates.io](https://img.shields.io/crates/v/vecfit.svg)](https://crates.io/crates/vecfit)
-[![docs.rs](https://docs.rs/vecfit/badge.svg)](https://docs.rs/vecfit)
-[![license](https://img.shields.io/crates/l/vecfit.svg)](LICENSE-MIT)
+[![Crates.io](https://img.shields.io/crates/v/vecfit.svg)](https://crates.io/crates/vecfit)
+[![Documentation](https://docs.rs/vecfit/badge.svg)](https://docs.rs/vecfit)
+[![CI](https://github.com/lukelowry/vecfit/actions/workflows/ci.yml/badge.svg)](https://github.com/lukelowry/vecfit/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/vecfit.svg)](LICENSE-MIT)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
 
-Pure-Rust implementation of [relaxed vector fitting](https://en.wikipedia.org/wiki/Vector_fitting)
+Pure-Rust implementation of relaxed vector fitting
 for rational approximation of frequency-domain data.
 Fits scalar, vector, and matrix-valued responses.
 
@@ -88,7 +90,16 @@ and matrix fitting.
 | `real(&x)` | `f64` | `x` (real line) | kernel fitting, Laplace domain |
 | `complex(&s)` | `Complex64` | passthrough | full control |
 
-## Example output
+## Examples
+
+```bash
+cargo run --example fit_scalar          # scalar closure fit
+cargo run --example fit_vector          # multi-channel vector fit
+cargo run --example fit_csv             # CSV parse-and-fit
+cargo run --example json_roundtrip      # JSON serialize/deserialize
+cargo run --example export_matrix_emt   # real-section + state-space export
+cargo run --example plot_scalar_report  # plotted report (PNG + Markdown)
+```
 
 ### Scalar fit (10 poles, RMSE 2.2e-4)
 
@@ -101,28 +112,6 @@ and matrix fitting.
 ### Matrix EMT fit (10 poles, 2x2, RMSE 1.9e-4)
 
 ![Matrix EMT fit](examples/out/matrix_emt_fit.png)
-
-## Examples
-
-```bash
-cargo run --example fit_scalar          # scalar closure fit
-cargo run --example fit_vector          # multi-channel vector fit
-cargo run --example fit_csv             # CSV parse-and-fit
-cargo run --example json_roundtrip      # JSON serialize/deserialize
-cargo run --example export_matrix_emt   # real-section + state-space export
-```
-
-Plotted reports (write PNG + Markdown to `examples/out/`):
-
-```bash
-cargo run --example plot_scalar_report
-cargo run --example plot_vector_report
-cargo run --example plot_matrix_emt_report
-cargo run --example plot_scalar_csv
-cargo run --example plot_matrix_csv
-cargo run --example plot_complex_json
-cargo run --example plot_real_kernel_json
-```
 
 ## Author
 
