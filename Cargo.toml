@@ -9,7 +9,7 @@ homepage = "https://github.com/lukelowry/vecfit"
 documentation = "https://docs.rs/vecfit"
 readme = "README.md"
 rust-version = "1.85"
-keywords = ["vector-fitting", "rational-approximation", "emt", "signal-processing", "numerics"]
+keywords = ["vector-fitting", "rational-fit", "emt", "signal-processing", "numerics"]
 categories = ["algorithms", "mathematics", "science"]
 exclude = ["examples/out/*", "CLAUDE.md", ".github/"]
 
