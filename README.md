@@ -10,9 +10,26 @@ Pure-Rust implementation of relaxed vector fitting
 for rational approximation of frequency-domain data.
 Fits scalar, vector, and matrix-valued responses.
 
+## Installation
+
+For library use:
+
+```bash
+cargo add vecfit
+```
+
+Or add it manually:
+
 ```toml
 [dependencies]
 vecfit = "0.1"
+```
+
+For CLI use:
+
+```bash
+cargo install vecfit
+vecfit fit data.csv --matrix 3 3 --poles 10 --output model.json
 ```
 
 ## Quick start
@@ -47,6 +64,14 @@ let model = Csv::from_path("data.csv")?.fit(Options::new().poles(4))?;
 
 Also supports TSV (`from_tsv`), SSV (`from_ssv`), and custom delimiters (`from_delimited`).
 For matrix-valued data, chain `.matrix(rows, cols)?` before `.fit(...)`.
+
+**Command line** CSV fitting:
+
+```bash
+vecfit fit data.csv --matrix 3 3 --poles 10 --output model.json
+```
+
+When `--output` is omitted, the command writes the complex model JSON to stdout.
 
 **Touchstone** (.s1p, .s2p, ...):
 
