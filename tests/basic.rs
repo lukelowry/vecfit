@@ -2,7 +2,8 @@ use approx::assert_relative_eq;
 use num_complex::Complex64;
 use vecfit::{
     ChannelStateSpace, Csv, DiscretizationMethod, FlatResponse, IntoResponse, Layout, Model,
-    ModelParts, Options, Shape, StateSpaceModel, VecfitError, complex, hz, rad, real,
+    ModelParts, Options, OutputRepresentation, Shape, StateSpaceModel, VecfitError, complex, hz,
+    rad, real,
 };
 
 fn build_samples(n: usize) -> Vec<Complex64> {
@@ -14,6 +15,14 @@ fn build_samples(n: usize) -> Vec<Complex64> {
 /// Known transfer function used across multiple tests.
 fn reference_scalar(s: Complex64) -> Complex64 {
     Complex64::from(0.05) + 1.2 / (s + 3.0) + 0.4 / (s + 15.0)
+}
+
+fn pair_from_json(value: &serde_json::Value) -> Complex64 {
+    let pair = value.as_array().expect("complex pair");
+    Complex64::new(
+        pair[0].as_f64().expect("real part"),
+        pair[1].as_f64().expect("imaginary part"),
+    )
 }
 
 // ============================================================
@@ -406,6 +415,205 @@ fn complex_json_roundtrip_preserves_shape_and_layout() {
     let loaded = Model::from_json(&json).expect("import");
     assert_eq!(loaded.shape(), model.shape());
     assert_eq!(loaded.layout(), model.layout());
+}
+
+#[test]
+fn modal_state_space_reconstructs_rank_one_matrix_residues() {
+    let states = 2;
+    let rows = 2;
+    let cols = 2;
+    let c = [
+        [Complex64::new(1.0, 0.0), Complex64::new(0.3, -0.2)],
+        [Complex64::new(0.4, 0.6), Complex64::new(-0.8, 0.1)],
+    ];
+    let b = [
+        [Complex64::new(0.7, -0.2), Complex64::new(-0.1, 0.3)],
+        [Complex64::new(0.5, 0.4), Complex64::new(0.9, -0.2)],
+    ];
+    let mut residues = Vec::new();
+    for (state_idx, b_row) in b.iter().enumerate().take(states) {
+        for c_row in c.iter().take(rows) {
+            for b_value in b_row.iter().take(cols) {
+                residues.push(c_row[state_idx] * *b_value);
+            }
+        }
+    }
+
+    let model = Model::from_parts(ModelParts {
+        poles: vec![Complex64::new(-1.0, 0.0), Complex64::new(-5.0, 0.0)],
+        residues: residues.clone(),
+        channels: rows * cols,
+        constant_terms: vec![Complex64::new(0.0, 0.0); rows * cols],
+        proportional_terms: vec![Complex64::new(0.0, 0.0); rows * cols],
+        shape: Shape::matrix(rows, cols).expect("shape"),
+        layout: Layout::RowMajor,
+        report: Default::default(),
+    })
+    .expect("model parts");
+
+    let state_space = model.modal_state_space().expect("modal state-space");
+    assert_eq!(state_space.rows, rows);
+    assert_eq!(state_space.cols, cols);
+    assert_eq!(state_space.states(), states);
+
+    let reconstructed = state_space.reconstruct_residues().expect("reconstruct");
+    for (actual, expected) in reconstructed.iter().zip(residues.iter()) {
+        assert_relative_eq!(actual.re, expected.re, epsilon = 1e-10);
+        assert_relative_eq!(actual.im, expected.im, epsilon = 1e-10);
+    }
+}
+
+#[test]
+fn modal_state_space_json_exports_actual_b_matrix() {
+    let pole = Complex64::new(-3.0, 0.0);
+    let c = [Complex64::new(1.0, 0.0), Complex64::new(0.4, 0.2)];
+    let b = [Complex64::new(0.7, -0.3), Complex64::new(-0.2, 0.5)];
+    let residue = [[c[0] * b[0], c[0] * b[1]], [c[1] * b[0], c[1] * b[1]]];
+    let sample_axis = build_samples(80);
+
+    let model = Model::fit(
+        complex(&sample_axis),
+        |s| {
+            [
+                [residue[0][0] / (s - pole), residue[0][1] / (s - pole)],
+                [residue[1][0] / (s - pole), residue[1][1] / (s - pole)],
+            ]
+        },
+        Options::new()
+            .poles(1)
+            .initial_poles(vec![pole])
+            .max_iterations(0)
+            .fit_constant(false)
+            .max_restarts(0)
+            .state_space_output(true),
+    )
+    .expect("fit");
+
+    assert_eq!(model.output(), OutputRepresentation::StateSpace);
+    assert!(
+        model.abs_rmse() < 1e-10,
+        "modal state-space rank-one fit RMSE = {:.3e}",
+        model.abs_rmse()
+    );
+
+    let json = model.to_json().expect("JSON export");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json value");
+    assert!(value.get("residues").is_none(), "json: {json}");
+    let c_json = value
+        .get("C")
+        .expect("C matrix")
+        .as_array()
+        .expect("C rows");
+    let b_json = value
+        .get("B")
+        .expect("B matrix")
+        .as_array()
+        .expect("B rows");
+    let loaded = Model::from_json(&json).expect("JSON import");
+    assert_eq!(loaded.output(), OutputRepresentation::StateSpace);
+    let b_row_json = b_json[0].as_array().expect("B row");
+    let mut wrong_convention_error = 0.0f64;
+    for (row, c_row_json) in c_json.iter().enumerate().take(2) {
+        let c_row_json = c_row_json.as_array().expect("C row");
+        for (col, b_value_json) in b_row_json.iter().enumerate().take(2) {
+            let exported_c = pair_from_json(&c_row_json[0]);
+            let exported_b = pair_from_json(b_value_json);
+            let expected = loaded.residue(0, row * 2 + col);
+            assert_relative_eq!((exported_c * exported_b).re, expected.re, epsilon = 1e-10);
+            assert_relative_eq!((exported_c * exported_b).im, expected.im, epsilon = 1e-10);
+            wrong_convention_error =
+                wrong_convention_error.max(((exported_c * exported_b.conj()) - expected).norm());
+        }
+    }
+    assert!(
+        wrong_convention_error > 1e-6,
+        "exported b must be the actual state-space B, not the SVD V column"
+    );
+}
+
+#[test]
+fn modal_state_space_phase_locks_conjugate_residue_pairs() {
+    let pole = Complex64::new(-2.0, 5.0);
+    let c = [Complex64::new(1.0, 0.2), Complex64::new(-0.4, 0.7)];
+    let b = [Complex64::new(0.6, -0.3), Complex64::new(0.2, 0.5)];
+    let residue = [[c[0] * b[0], c[0] * b[1]], [c[1] * b[0], c[1] * b[1]]];
+    let residues = vec![
+        residue[0][0],
+        residue[0][1],
+        residue[1][0],
+        residue[1][1],
+        residue[0][0].conj(),
+        residue[0][1].conj(),
+        residue[1][0].conj(),
+        residue[1][1].conj(),
+    ];
+
+    let model = Model::from_parts(ModelParts {
+        poles: vec![pole, pole.conj()],
+        residues,
+        channels: 4,
+        constant_terms: vec![Complex64::new(0.0, 0.0); 4],
+        proportional_terms: vec![Complex64::new(0.0, 0.0); 4],
+        shape: Shape::matrix(2, 2).expect("shape"),
+        layout: Layout::RowMajor,
+        report: Default::default(),
+    })
+    .expect("model parts");
+
+    let state_space = model.modal_state_space().expect("modal state-space");
+    for row in 0..state_space.rows {
+        assert_relative_eq!(
+            state_space.c_entry(row, 1).re,
+            state_space.c_entry(row, 0).conj().re,
+            epsilon = 1e-10
+        );
+        assert_relative_eq!(
+            state_space.c_entry(row, 1).im,
+            state_space.c_entry(row, 0).conj().im,
+            epsilon = 1e-10
+        );
+    }
+    for col in 0..state_space.cols {
+        assert_relative_eq!(
+            state_space.b_entry(1, col).re,
+            state_space.b_entry(0, col).conj().re,
+            epsilon = 1e-10
+        );
+        assert_relative_eq!(
+            state_space.b_entry(1, col).im,
+            state_space.b_entry(0, col).conj().im,
+            epsilon = 1e-10
+        );
+    }
+}
+
+#[test]
+fn modal_state_space_does_not_symmetrize_nonconjugate_residue_pairs() {
+    let pole = Complex64::new(-2.0, 5.0);
+    let residues = vec![
+        Complex64::new(0.4, -0.2),
+        Complex64::new(-0.1, 0.3),
+        Complex64::new(0.7, 0.6),
+        Complex64::new(0.2, -0.5),
+    ];
+    let model = Model::from_parts(ModelParts {
+        poles: vec![pole, pole.conj()],
+        residues: residues.clone(),
+        channels: 2,
+        constant_terms: vec![Complex64::new(0.0, 0.0); 2],
+        proportional_terms: vec![Complex64::new(0.0, 0.0); 2],
+        shape: Shape::vector(2).expect("shape"),
+        layout: Layout::RowMajor,
+        report: Default::default(),
+    })
+    .expect("model parts");
+
+    let state_space = model.modal_state_space().expect("modal state-space");
+    let reconstructed = state_space.reconstruct_residues().expect("reconstruct");
+    for (actual, expected) in reconstructed.iter().zip(residues.iter()) {
+        assert_relative_eq!(actual.re, expected.re, epsilon = 1e-10);
+        assert_relative_eq!(actual.im, expected.im, epsilon = 1e-10);
+    }
 }
 
 #[test]

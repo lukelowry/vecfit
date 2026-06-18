@@ -72,6 +72,10 @@ vecfit fit data.csv --matrix 3 3 --poles 10 --output model.json
 ```
 
 When `--output` is omitted, the command writes the complex model JSON to stdout.
+Add `--state-space` to export a complex modal state-space realization with
+shared poles and `C`/`B` matrices instead of full per-pole residues.
+Use `--terms none`, `--terms d`, `--terms e`, or `--terms de` to choose
+which polynomial terms are fitted.
 
 **Touchstone** (.s1p, .s2p, ...):
 
@@ -105,6 +109,19 @@ let model = Model::fit(
 Closures can return scalars, arrays, or nested arrays — the shape is inferred automatically.
 See the [API docs](https://docs.rs/vecfit) for `c(re, im)`, axis wrappers (`hz`, `rad`, `real`),
 and matrix fitting.
+
+For modal state-space JSON export, use:
+
+```rust,no_run
+use vecfit::{Options, OutputRepresentation};
+
+let options = Options::new()
+    .poles(10)
+    .output(OutputRepresentation::StateSpace);
+```
+
+Scalar and vector outputs are exact in this representation. True matrix
+responses use the leading rank-one SVD term for each pole residue.
 
 ## Axis wrappers
 

@@ -134,6 +134,16 @@ pub enum WeightStrategy {
     InverseMagnitude,
 }
 
+/// Output representation to use for fitted models and complex JSON export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OutputRepresentation {
+    /// Keep and export the full residue matrix/vector for each pole.
+    #[default]
+    Residues,
+    /// Export a complex shared-pole modal state-space realization.
+    StateSpace,
+}
+
 /// Automatically search for the best pole count within a range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoPoles {
@@ -186,6 +196,8 @@ pub struct Options {
     pub auto_poles: Option<AutoPoles>,
     /// Record pole positions at each iteration for migration diagnostics.
     pub track_pole_history: bool,
+    /// Representation used when exporting the fitted model.
+    pub output: OutputRepresentation,
     /// Memory layout for flattened output (default: RowMajor).
     pub layout: Layout,
 }
@@ -207,6 +219,7 @@ impl Default for Options {
             restart_threshold: 0.05,
             auto_poles: None,
             track_pole_history: false,
+            output: OutputRepresentation::Residues,
             layout: Layout::RowMajor,
         }
     }
@@ -284,6 +297,20 @@ impl Options {
 
     pub fn track_pole_history(mut self, track: bool) -> Self {
         self.track_pole_history = track;
+        self
+    }
+
+    pub fn output(mut self, output: OutputRepresentation) -> Self {
+        self.output = output;
+        self
+    }
+
+    pub fn state_space_output(mut self, enabled: bool) -> Self {
+        self.output = if enabled {
+            OutputRepresentation::StateSpace
+        } else {
+            OutputRepresentation::Residues
+        };
         self
     }
 

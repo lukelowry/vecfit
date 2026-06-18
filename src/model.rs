@@ -6,8 +6,8 @@ use crate::axis::{AsComplexAxis, Axis, IntoAxis};
 use crate::emt::{RealSectionModel, StateSpaceModel, supports_real_sections};
 use crate::error::{Result, VecfitError};
 use crate::fit::{
-    AutoPoles, Options, ProblemRef, Report, SampleMatrix, SampleMatrixRef, WeightStrategy,
-    apply_sample_weights, compute_inverse_magnitude_weights, initial_poles,
+    AutoPoles, Options, OutputRepresentation, ProblemRef, Report, SampleMatrix, SampleMatrixRef,
+    WeightStrategy, apply_sample_weights, compute_inverse_magnitude_weights, initial_poles,
     matrix_from_row_major_slice, pole_basis_matrix, solve_least_squares_scaled, validate_weights,
 };
 use crate::shape::{IntoResponse, Layout, ResponseSample, Shape};
@@ -20,6 +20,9 @@ const SHIFT_NORM_EPSILON: f64 = 1e-15;
 
 /// Tolerance for averaging nearby poles into conjugate pairs.
 const CONJUGATE_MATCH_TOLERANCE_SCALE: f64 = 1e-6;
+
+/// Tolerance for recognizing conjugate residue pairs during modal export.
+const RESIDUE_CONJUGATE_TOLERANCE_SCALE: f64 = 1e-8;
 
 /// Poles with real part at or below this threshold are considered stable.
 const POLE_STABILITY_THRESHOLD: f64 = 1e-12;
@@ -47,6 +50,198 @@ pub struct ModelParts {
     pub report: Report,
 }
 
+/// Complex shared-pole modal state-space realization.
+///
+/// This represents `H(s) = C(sI - A)^-1B + D + sE`, where
+/// `A = diag(poles)`.  `c` is stored row-major as `rows x states`,
+/// `b` as `states x cols`, and `d`/`e` as row-major `rows x cols` matrices.
+/// Scalar and vector models are exact under this representation; true matrix
+/// responses use a leading rank-one SVD approximation per pole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModalStateSpace {
+    pub poles: Vec<Complex64>,
+    pub c: Vec<Complex64>,
+    pub b: Vec<Complex64>,
+    pub d: Vec<Complex64>,
+    pub e: Vec<Complex64>,
+    pub rows: usize,
+    pub cols: usize,
+    pub shape: Shape,
+    pub layout: Layout,
+}
+
+/// Component parts for constructing a [`ModalStateSpace`] directly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModalStateSpaceParts {
+    pub poles: Vec<Complex64>,
+    pub c: Vec<Complex64>,
+    pub b: Vec<Complex64>,
+    pub d: Vec<Complex64>,
+    pub e: Vec<Complex64>,
+    pub rows: usize,
+    pub cols: usize,
+    pub shape: Shape,
+    pub layout: Layout,
+}
+
+impl ModalStateSpace {
+    pub fn new(parts: ModalStateSpaceParts) -> Result<Self> {
+        let ModalStateSpaceParts {
+            poles,
+            c,
+            b,
+            d,
+            e,
+            rows,
+            cols,
+            shape,
+            layout,
+        } = parts;
+        let state_count = poles.len();
+        if rows == 0 || cols == 0 {
+            return Err(VecfitError::Shape(
+                "state-space dimensions must be positive".to_string(),
+            ));
+        }
+        if shape.channels() != rows * cols {
+            return Err(VecfitError::Dimension(format!(
+                "state-space dimensions {}x{} do not match shape {:?}",
+                rows,
+                cols,
+                shape.dims()
+            )));
+        }
+        let (shape_rows, shape_cols) = residue_matrix_dims(&shape)?;
+        if rows != shape_rows || cols != shape_cols {
+            return Err(VecfitError::Dimension(format!(
+                "state-space dimensions {}x{} do not match shape {:?}",
+                rows,
+                cols,
+                shape.dims()
+            )));
+        }
+        if c.len() != rows * state_count {
+            return Err(VecfitError::Dimension(format!(
+                "C matrix length {} does not match {}x{}",
+                c.len(),
+                rows,
+                state_count
+            )));
+        }
+        if b.len() != state_count * cols {
+            return Err(VecfitError::Dimension(format!(
+                "B matrix length {} does not match {}x{}",
+                b.len(),
+                state_count,
+                cols
+            )));
+        }
+        if d.len() != rows * cols {
+            return Err(VecfitError::Dimension(format!(
+                "D term length {} does not match {}x{}",
+                d.len(),
+                rows,
+                cols
+            )));
+        }
+        if e.len() != rows * cols {
+            return Err(VecfitError::Dimension(format!(
+                "E term length {} does not match {}x{}",
+                e.len(),
+                rows,
+                cols
+            )));
+        }
+        Ok(Self {
+            poles,
+            c,
+            b,
+            d,
+            e,
+            rows,
+            cols,
+            shape,
+            layout,
+        })
+    }
+
+    pub fn states(&self) -> usize {
+        self.poles.len()
+    }
+
+    pub fn c(&self) -> &[Complex64] {
+        &self.c
+    }
+
+    pub fn b(&self) -> &[Complex64] {
+        &self.b
+    }
+
+    pub fn d(&self) -> &[Complex64] {
+        &self.d
+    }
+
+    pub fn e(&self) -> &[Complex64] {
+        &self.e
+    }
+
+    pub fn c_entry(&self, row: usize, state: usize) -> Complex64 {
+        self.c[row * self.states() + state]
+    }
+
+    pub fn b_entry(&self, state: usize, col: usize) -> Complex64 {
+        self.b[state * self.cols + col]
+    }
+
+    pub fn d_entry(&self, row: usize, col: usize) -> Complex64 {
+        self.d[row * self.cols + col]
+    }
+
+    pub fn e_entry(&self, row: usize, col: usize) -> Complex64 {
+        self.e[row * self.cols + col]
+    }
+
+    pub fn reconstruct_residues(&self) -> Result<Vec<Complex64>> {
+        self.reconstruct_residues_with_layout(self.layout)
+    }
+
+    pub fn reconstruct_residues_with_layout(&self, layout: Layout) -> Result<Vec<Complex64>> {
+        let channels = self.rows * self.cols;
+        let mut residues = vec![Complex64::new(0.0, 0.0); self.states() * channels];
+        for state_idx in 0..self.states() {
+            for row in 0..self.rows {
+                for col in 0..self.cols {
+                    let channel_idx = matrix_channel_index(row, col, self.rows, self.cols, layout);
+                    residues[state_idx * channels + channel_idx] =
+                        self.c_entry(row, state_idx) * self.b_entry(state_idx, col);
+                }
+            }
+        }
+        Ok(residues)
+    }
+
+    fn validate_against_model(&self, model: &Model) -> Result<()> {
+        if self.poles != model.poles {
+            return Err(VecfitError::Dimension(
+                "modal state-space poles do not match model poles".to_string(),
+            ));
+        }
+        if self.shape != model.shape || self.layout != model.layout {
+            return Err(VecfitError::Dimension(
+                "modal state-space shape/layout do not match model".to_string(),
+            ));
+        }
+        let d_flat = matrix_terms_to_flat(&self.d, self.rows, self.cols, self.layout);
+        let e_flat = matrix_terms_to_flat(&self.e, self.rows, self.cols, self.layout);
+        if d_flat != model.constant_terms || e_flat != model.proportional_terms {
+            return Err(VecfitError::Dimension(
+                "modal state-space direct/proportional terms do not match model".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Fitted rational model with shared poles and per-channel residues.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
@@ -58,6 +253,10 @@ pub struct Model {
     pub(crate) shape: Shape,
     pub(crate) layout: Layout,
     pub(crate) report: Report,
+    #[serde(default)]
+    pub(crate) output: OutputRepresentation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) modal_state_space: Option<ModalStateSpace>,
 }
 
 /// Per-channel error metrics returned by [`Model::channel_errors`].
@@ -81,6 +280,8 @@ impl Model {
             shape: parts.shape,
             layout: parts.layout,
             report: parts.report,
+            output: OutputRepresentation::Residues,
+            modal_state_space: None,
         };
         model.validate()?;
         Ok(model)
@@ -314,6 +515,9 @@ impl Model {
                 self.channels
             )));
         }
+        if let Some(state_space) = &self.modal_state_space {
+            state_space.validate_against_model(self)?;
+        }
         Ok(())
     }
 
@@ -330,6 +534,25 @@ impl Model {
     /// Return the per-channel residues in row-major order: `residues[pole * channels + channel]`.
     pub fn residues(&self) -> &[Complex64] {
         &self.residues
+    }
+
+    /// Return the configured output representation for this model.
+    pub fn output(&self) -> OutputRepresentation {
+        self.output
+    }
+
+    /// Return a complex shared-pole modal state-space realization.
+    ///
+    /// The realization is exact for scalar and vector-valued models.  For true
+    /// matrix-valued models, each pole residue is approximated by its leading
+    /// rank-one SVD term.  Conjugate pole pairs are phase-locked only when
+    /// their residues already satisfy conjugate symmetry.
+    pub fn modal_state_space(&self) -> Result<ModalStateSpace> {
+        self.validate()?;
+        if let Some(state_space) = &self.modal_state_space {
+            return Ok(state_space.clone());
+        }
+        compute_modal_state_space(self)
     }
 
     /// Return the number of output channels.
@@ -714,7 +937,10 @@ fn run_single_fit(
         shape: problem.shape.clone(),
         layout: problem.layout,
         report,
+        output: options.output,
+        modal_state_space: None,
     };
+    prepare_output_representation(&mut model, options.output)?;
     update_model_report(&mut model, axis, problem.response.values)?;
     Ok(model)
 }
@@ -949,6 +1175,239 @@ fn extract_proportional_terms(
             .collect()
     } else {
         vec![Complex64::new(0.0, 0.0); channels]
+    }
+}
+
+fn prepare_output_representation(model: &mut Model, output: OutputRepresentation) -> Result<()> {
+    model.output = output;
+    model.modal_state_space = None;
+    if output == OutputRepresentation::StateSpace {
+        model.validate()?;
+        model.modal_state_space = Some(compute_modal_state_space(model)?);
+    }
+    Ok(())
+}
+
+fn compute_modal_state_space(model: &Model) -> Result<ModalStateSpace> {
+    let (rows, cols) = residue_matrix_dims(&model.shape)?;
+    let states = model.poles.len();
+    let mut c = vec![Complex64::new(0.0, 0.0); rows * states];
+    let mut b = vec![Complex64::new(0.0, 0.0); states * cols];
+    {
+        let mut factors = ModalFactorStorage {
+            c: &mut c,
+            b: &mut b,
+            rows,
+            cols,
+            states,
+        };
+        let mut used = vec![false; states];
+        let pair_tol = conjugate_pair_tolerance(&model.poles);
+
+        for state_idx in 0..states {
+            if used[state_idx] {
+                continue;
+            }
+
+            let pole = model.poles[state_idx];
+            if pole.im.abs() > pair_tol {
+                if let Some(partner_idx) =
+                    find_conjugate_partner(&model.poles, &used, state_idx, pair_tol)
+                {
+                    if conjugate_residues_match(model, state_idx, partner_idx, rows, cols) {
+                        let (base_idx, conjugate_idx) = if pole.im >= 0.0 {
+                            (state_idx, partner_idx)
+                        } else {
+                            (partner_idx, state_idx)
+                        };
+                        let residue_matrix = residue_matrix_for_pole(model, base_idx, rows, cols);
+                        let (base_c, base_b) = factor_rank_one_residue(&residue_matrix)?;
+                        factors.set_state(base_idx, &base_c, &base_b);
+                        let conj_c = base_c.iter().map(|value| value.conj()).collect::<Vec<_>>();
+                        let conj_b = base_b.iter().map(|value| value.conj()).collect::<Vec<_>>();
+                        factors.set_state(conjugate_idx, &conj_c, &conj_b);
+                        used[base_idx] = true;
+                        used[conjugate_idx] = true;
+                        continue;
+                    }
+                }
+            }
+
+            let residue_matrix = residue_matrix_for_pole(model, state_idx, rows, cols);
+            let (state_c, state_b) = factor_rank_one_residue(&residue_matrix)?;
+            factors.set_state(state_idx, &state_c, &state_b);
+            used[state_idx] = true;
+        }
+    }
+
+    ModalStateSpace::new(ModalStateSpaceParts {
+        poles: model.poles.clone(),
+        c,
+        b,
+        d: matrix_terms_from_flat(&model.constant_terms, rows, cols, model.layout),
+        e: matrix_terms_from_flat(&model.proportional_terms, rows, cols, model.layout),
+        rows,
+        cols,
+        shape: model.shape.clone(),
+        layout: model.layout,
+    })
+}
+
+fn residue_matrix_for_pole(
+    model: &Model,
+    pole_idx: usize,
+    rows: usize,
+    cols: usize,
+) -> Mat<Complex64> {
+    Mat::from_fn(rows, cols, |row, col| {
+        let channel_idx = matrix_channel_index(row, col, rows, cols, model.layout);
+        model.residues[pole_idx * model.channels + channel_idx]
+    })
+}
+
+fn conjugate_residues_match(
+    model: &Model,
+    left_idx: usize,
+    right_idx: usize,
+    rows: usize,
+    cols: usize,
+) -> bool {
+    let left = residue_matrix_for_pole(model, left_idx, rows, cols);
+    let right = residue_matrix_for_pole(model, right_idx, rows, cols);
+    let mut scale = 0.0f64;
+    let mut max_error = 0.0f64;
+    for row in 0..rows {
+        for col in 0..cols {
+            let left_value = left[(row, col)];
+            let right_value = right[(row, col)];
+            scale = scale.max(left_value.norm()).max(right_value.norm());
+            max_error = max_error.max((left_value - right_value.conj()).norm());
+        }
+    }
+    max_error <= RESIDUE_CONJUGATE_TOLERANCE_SCALE * (scale + 1.0)
+}
+
+fn factor_rank_one_residue(matrix: &Mat<Complex64>) -> Result<(Vec<Complex64>, Vec<Complex64>)> {
+    let svd = matrix.as_ref().thin_svd()?;
+    let sigma = svd.S().column_vector()[0].re.max(0.0);
+    let scale = sigma.sqrt();
+    let c = (0..matrix.nrows())
+        .map(|row| svd.U()[(row, 0)] * scale)
+        .collect::<Vec<_>>();
+    let b = (0..matrix.ncols())
+        .map(|col| svd.V()[(col, 0)].conj() * scale)
+        .collect::<Vec<_>>();
+    Ok((c, b))
+}
+
+struct ModalFactorStorage<'a> {
+    c: &'a mut [Complex64],
+    b: &'a mut [Complex64],
+    rows: usize,
+    cols: usize,
+    states: usize,
+}
+
+impl ModalFactorStorage<'_> {
+    fn set_state(&mut self, state_idx: usize, state_c: &[Complex64], state_b: &[Complex64]) {
+        debug_assert_eq!(state_c.len(), self.rows);
+        debug_assert_eq!(state_b.len(), self.cols);
+        for (row, value) in state_c.iter().enumerate().take(self.rows) {
+            self.c[row * self.states + state_idx] = *value;
+        }
+        for (col, value) in state_b.iter().enumerate().take(self.cols) {
+            self.b[state_idx * self.cols + col] = *value;
+        }
+    }
+}
+
+fn find_conjugate_partner(
+    poles: &[Complex64],
+    used: &[bool],
+    state_idx: usize,
+    tol: f64,
+) -> Option<usize> {
+    poles
+        .iter()
+        .enumerate()
+        .find_map(|(candidate_idx, candidate)| {
+            if candidate_idx == state_idx || used[candidate_idx] {
+                return None;
+            }
+            let pole = poles[state_idx];
+            if (candidate.re - pole.re).abs() <= tol && (candidate.im + pole.im).abs() <= tol {
+                Some(candidate_idx)
+            } else {
+                None
+            }
+        })
+}
+
+fn conjugate_pair_tolerance(poles: &[Complex64]) -> f64 {
+    CONJUGATE_MATCH_TOLERANCE_SCALE * (poles.iter().map(|p| p.norm()).fold(0.0f64, f64::max) + 1.0)
+}
+
+pub(crate) fn matrix_terms_from_flat(
+    values: &[Complex64],
+    rows: usize,
+    cols: usize,
+    layout: Layout,
+) -> Vec<Complex64> {
+    let mut out = vec![Complex64::new(0.0, 0.0); rows * cols];
+    for row in 0..rows {
+        for col in 0..cols {
+            let channel_idx = matrix_channel_index(row, col, rows, cols, layout);
+            out[row * cols + col] = values[channel_idx];
+        }
+    }
+    out
+}
+
+pub(crate) fn matrix_terms_to_flat(
+    values: &[Complex64],
+    rows: usize,
+    cols: usize,
+    layout: Layout,
+) -> Vec<Complex64> {
+    let mut out = vec![Complex64::new(0.0, 0.0); rows * cols];
+    for row in 0..rows {
+        for col in 0..cols {
+            let channel_idx = matrix_channel_index(row, col, rows, cols, layout);
+            out[channel_idx] = values[row * cols + col];
+        }
+    }
+    out
+}
+
+pub(crate) fn residue_matrix_dims(shape: &Shape) -> Result<(usize, usize)> {
+    match shape.dims() {
+        [] => Ok((1, 1)),
+        [len] => Ok((*len, 1)),
+        [rows, cols] => Ok((*rows, *cols)),
+        dims => Err(VecfitError::Shape(format!(
+            "modal state-space export requires scalar, vector, or matrix shape, found {dims:?}"
+        ))),
+    }
+}
+
+pub(crate) fn matrix_channel_index(
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    layout: Layout,
+) -> usize {
+    match layout {
+        Layout::RowMajor => {
+            debug_assert!(row < rows);
+            debug_assert!(col < cols);
+            row * cols + col
+        }
+        Layout::ColumnMajor => {
+            debug_assert!(row < rows);
+            debug_assert!(col < cols);
+            col * rows + row
+        }
     }
 }
 

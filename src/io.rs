@@ -7,8 +7,10 @@ use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VecfitError};
-use crate::fit::{Options, Report, SampleMatrix};
-use crate::model::Model;
+use crate::fit::{Options, OutputRepresentation, Report, SampleMatrix};
+use crate::model::{
+    ModalStateSpace, ModalStateSpaceParts, Model, matrix_terms_from_flat, residue_matrix_dims,
+};
 use crate::shape::{Layout, ResponseSample, Shape};
 
 /// Tolerance for checking whether coefficients are purely real in real-kernel export.
@@ -42,11 +44,30 @@ pub struct RealKernelJsonModel {
     pub poles: Vec<RealKernelPoleJson>,
 }
 
-/// Complex-valued JSON model with shared poles and per-channel residues.
+/// Complex-valued JSON model with shared poles.
+///
+/// The residue form uses `residues[pole][channel]`. The modal state-space form
+/// uses `C[output_row][state]` and `B[state][input_col]` for
+/// `H(s) = C(sI - diag(poles))^-1B + D + sE`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplexModelJson {
     pub poles: Vec<[f64; 2]>,
-    pub residues: Vec<Vec<[f64; 2]>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residues: Option<Vec<Vec<[f64; 2]>>>,
+    #[serde(
+        rename = "C",
+        alias = "c",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub c: Option<Vec<Vec<[f64; 2]>>>,
+    #[serde(
+        rename = "B",
+        alias = "b",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub b: Option<Vec<Vec<[f64; 2]>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<Shape>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -459,10 +480,68 @@ impl TryFrom<ComplexModelJson> for Model {
 
     fn try_from(json: ComplexModelJson) -> Result<Self> {
         let pole_count = json.poles.len();
-        let channels = json.direct_terms.len();
-        if json.residues.len() != pole_count {
+        let layout = json.layout.unwrap_or(Layout::RowMajor);
+        let has_residues = json.residues.is_some();
+        let has_c = json.c.is_some();
+        let has_b = json.b.is_some();
+        if has_residues && (has_c || has_b) {
             return Err(VecfitError::Serialization(
-                "complex JSON residue rows must match pole count".to_string(),
+                "complex JSON must contain either residues or C/B state-space matrices, not both"
+                    .to_string(),
+            ));
+        }
+        if has_c != has_b {
+            return Err(VecfitError::Serialization(
+                "complex JSON state-space form requires both C and B".to_string(),
+            ));
+        }
+
+        let poles = json
+            .poles
+            .iter()
+            .copied()
+            .map(complex_from_pair)
+            .collect::<Vec<_>>();
+
+        let channels = if let Some(residue_rows) = &json.residues {
+            if residue_rows.len() != pole_count {
+                return Err(VecfitError::Serialization(
+                    "complex JSON residue rows must match pole count".to_string(),
+                ));
+            }
+            json.direct_terms.len()
+        } else if let (Some(c_rows), Some(b_rows)) = (&json.c, &json.b) {
+            if pole_count == 0 {
+                return Err(VecfitError::Serialization(
+                    "complex JSON state-space form requires at least one pole".to_string(),
+                ));
+            }
+            if c_rows.is_empty() {
+                return Err(VecfitError::Serialization(
+                    "complex JSON C matrix must have at least one row".to_string(),
+                ));
+            }
+            if b_rows.len() != pole_count {
+                return Err(VecfitError::Serialization(
+                    "complex JSON B matrix row count must match pole count".to_string(),
+                ));
+            }
+            let rows = c_rows.len();
+            let cols = b_rows.first().map_or(0, Vec::len);
+            rows.checked_mul(cols).ok_or_else(|| {
+                VecfitError::Serialization(
+                    "complex JSON state-space dimensions are too large".to_string(),
+                )
+            })?
+        } else {
+            return Err(VecfitError::Serialization(
+                "complex JSON must contain residues or C/B state-space matrices".to_string(),
+            ));
+        };
+
+        if json.direct_terms.len() != channels {
+            return Err(VecfitError::Serialization(
+                "complex JSON direct term count must match channel count".to_string(),
             ));
         }
         if json.proportional_terms.len() != channels {
@@ -470,38 +549,77 @@ impl TryFrom<ComplexModelJson> for Model {
                 "complex JSON proportional term count must match channel count".to_string(),
             ));
         }
-        if json.residues.iter().any(|row| row.len() != channels) {
-            return Err(VecfitError::Serialization(
-                "complex JSON residue row length must match channel count".to_string(),
-            ));
-        }
 
-        let residues = json
-            .residues
+        let direct_terms = json
+            .direct_terms
             .iter()
-            .flat_map(|row| row.iter().copied().map(complex_from_pair))
+            .copied()
+            .map(complex_from_pair)
             .collect::<Vec<_>>();
+        let proportional_terms = json
+            .proportional_terms
+            .iter()
+            .copied()
+            .map(complex_from_pair)
+            .collect::<Vec<_>>();
+
+        let (shape, residues, output, modal_state_space) = if let Some(residue_rows) = json.residues
+        {
+            if residue_rows.iter().any(|row| row.len() != channels) {
+                return Err(VecfitError::Serialization(
+                    "complex JSON residue row length must match channel count".to_string(),
+                ));
+            }
+            (
+                resolve_json_shape(json.shape, channels)?,
+                residue_rows
+                    .iter()
+                    .flat_map(|row| row.iter().copied().map(complex_from_pair))
+                    .collect::<Vec<_>>(),
+                OutputRepresentation::Residues,
+                None,
+            )
+        } else if let (Some(c_rows), Some(b_rows)) = (json.c, json.b) {
+            let rows = c_rows.len();
+            let cols = b_rows.first().map_or(0, Vec::len);
+            let shape = resolve_state_space_json_shape(json.shape, rows, cols)?;
+            let state_space = ModalStateSpace::new(ModalStateSpaceParts {
+                poles: poles.clone(),
+                c: parse_complex_matrix(c_rows, rows, pole_count, "c")?,
+                b: parse_complex_matrix(b_rows, pole_count, cols, "b")?,
+                d: matrix_terms_from_flat(&direct_terms, rows, cols, layout),
+                e: matrix_terms_from_flat(&proportional_terms, rows, cols, layout),
+                rows,
+                cols,
+                shape: shape.clone(),
+                layout,
+            })?;
+            let residues = state_space.reconstruct_residues()?;
+            (
+                shape,
+                residues,
+                OutputRepresentation::StateSpace,
+                Some(state_space),
+            )
+        } else {
+            unreachable!("residue/c/b presence was validated above");
+        };
+
         let model = Model {
-            poles: json.poles.into_iter().map(complex_from_pair).collect(),
+            poles,
             residues,
             channels,
-            constant_terms: json
-                .direct_terms
-                .into_iter()
-                .map(complex_from_pair)
-                .collect(),
-            proportional_terms: json
-                .proportional_terms
-                .into_iter()
-                .map(complex_from_pair)
-                .collect(),
-            shape: resolve_json_shape(json.shape, channels)?,
-            layout: json.layout.unwrap_or(Layout::RowMajor),
+            constant_terms: direct_terms,
+            proportional_terms,
+            shape,
+            layout,
             report: Report {
                 abs_rmse: json.abs_rmse,
                 iterations: json.iterations,
                 ..Report::default()
             },
+            output,
+            modal_state_space,
         };
         model.validate()?;
         Ok(model)
@@ -513,16 +631,41 @@ impl TryFrom<&Model> for ComplexModelJson {
 
     fn try_from(model: &Model) -> Result<Self> {
         model.validate()?;
-        let residues = (0..model.poles.len())
-            .map(|pole_idx| {
-                (0..model.channels)
-                    .map(|channel_idx| {
-                        let value = model.residues[pole_idx * model.channels + channel_idx];
-                        [value.re, value.im]
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        let (residues, c, b) = match model.output {
+            OutputRepresentation::Residues => (
+                Some(
+                    (0..model.poles.len())
+                        .map(|pole_idx| {
+                            (0..model.channels)
+                                .map(|channel_idx| {
+                                    let value =
+                                        model.residues[pole_idx * model.channels + channel_idx];
+                                    [value.re, value.im]
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                None,
+                None,
+            ),
+            OutputRepresentation::StateSpace => {
+                let state_space = model.modal_state_space()?;
+                (
+                    None,
+                    Some(complex_matrix_to_pairs(
+                        &state_space.c,
+                        state_space.rows,
+                        state_space.states(),
+                    )),
+                    Some(complex_matrix_to_pairs(
+                        &state_space.b,
+                        state_space.states(),
+                        state_space.cols,
+                    )),
+                )
+            }
+        };
         Ok(Self {
             poles: model
                 .poles
@@ -530,6 +673,8 @@ impl TryFrom<&Model> for ComplexModelJson {
                 .map(|value| [value.re, value.im])
                 .collect(),
             residues,
+            c,
+            b,
             shape: Some(model.shape.clone()),
             layout: Some(model.layout),
             direct_terms: model
@@ -609,6 +754,8 @@ impl TryFrom<RealKernelJsonModel> for Model {
             shape: resolve_json_shape(json.shape, channels)?,
             layout: json.layout.unwrap_or(Layout::RowMajor),
             report: Report::default(),
+            output: OutputRepresentation::Residues,
+            modal_state_space: None,
         };
         model.validate()?;
         Ok(model)
@@ -742,6 +889,41 @@ fn complex_from_pair(value: [f64; 2]) -> Complex64 {
     Complex64::new(value[0], value[1])
 }
 
+fn complex_matrix_to_pairs(values: &[Complex64], rows: usize, cols: usize) -> Vec<Vec<[f64; 2]>> {
+    (0..rows)
+        .map(|row| {
+            (0..cols)
+                .map(|col| {
+                    let value = values[row * cols + col];
+                    [value.re, value.im]
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn parse_complex_matrix(
+    rows: Vec<Vec<[f64; 2]>>,
+    expected_rows: usize,
+    expected_cols: usize,
+    name: &str,
+) -> Result<Vec<Complex64>> {
+    if rows.len() != expected_rows {
+        return Err(VecfitError::Serialization(format!(
+            "complex JSON {name} matrix row count must be {expected_rows}"
+        )));
+    }
+    if rows.iter().any(|row| row.len() != expected_cols) {
+        return Err(VecfitError::Serialization(format!(
+            "complex JSON {name} matrix column count must be {expected_cols}"
+        )));
+    }
+    Ok(rows
+        .into_iter()
+        .flat_map(|row| row.into_iter().map(complex_from_pair))
+        .collect())
+}
+
 fn resolve_json_shape(shape: Option<Shape>, channels: usize) -> Result<Shape> {
     let shape = match shape {
         Some(shape) => shape,
@@ -754,6 +936,30 @@ fn resolve_json_shape(shape: Option<Shape>, channels: usize) -> Result<Shape> {
             shape.dims(),
             shape.channels(),
             channels
+        )));
+    }
+    Ok(shape)
+}
+
+fn resolve_state_space_json_shape(shape: Option<Shape>, rows: usize, cols: usize) -> Result<Shape> {
+    if rows == 0 || cols == 0 {
+        return Err(VecfitError::Serialization(
+            "complex JSON state-space matrices must have positive dimensions".to_string(),
+        ));
+    }
+    let shape = match shape {
+        Some(shape) => shape,
+        None if rows == 1 && cols == 1 => Shape::scalar(),
+        None if cols == 1 => Shape::vector(rows)?,
+        None => Shape::matrix(rows, cols)?,
+    };
+    let (shape_rows, shape_cols) = residue_matrix_dims(&shape)?;
+    if shape_rows != rows || shape_cols != cols {
+        return Err(VecfitError::Serialization(format!(
+            "complex JSON state-space dimensions {}x{} do not match shape {:?}",
+            rows,
+            cols,
+            shape.dims()
         )));
     }
     Ok(shape)

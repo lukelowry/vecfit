@@ -103,13 +103,13 @@ pub use crate::emt::{
 };
 pub use crate::error::{Result, VecfitError};
 pub use crate::fit::{
-    AutoPoles, Options, ProblemRef, Report, SampleMatrix, SampleMatrixRef, SolverPolicy,
-    SolverUsed, WeightStrategy,
+    AutoPoles, Options, OutputRepresentation, ProblemRef, Report, SampleMatrix, SampleMatrixRef,
+    SolverPolicy, SolverUsed, WeightStrategy,
 };
 pub use crate::io::{
     ComplexModelJson, Csv, ParsedSamples, RealKernelJsonModel, RealKernelPoleJson,
 };
-pub use crate::model::{ChannelErrors, Model, ModelParts};
+pub use crate::model::{ChannelErrors, ModalStateSpace, ModalStateSpaceParts, Model, ModelParts};
 pub use crate::shape::{FlatResponse, IntoResponse, Layout, ResponseSample, ResponseScalar, Shape};
 pub use crate::touchstone::{
     DataFormat, FrequencyUnit, ParameterType, Touchstone, TouchstoneOptions,

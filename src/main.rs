@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use vecfit::{Csv, Options, WeightStrategy};
+use vecfit::{Csv, Options, OutputRepresentation, WeightStrategy};
 
 type CliResult<T> = Result<T, String>;
 
@@ -39,11 +39,9 @@ fn run(args: impl IntoIterator<Item = String>) -> CliResult<()> {
 #[derive(Debug)]
 struct FitConfig {
     input: PathBuf,
-    poles: usize,
     matrix: Option<(usize, usize)>,
-    real_only: bool,
-    weighted: bool,
     output: Option<PathBuf>,
+    options: Options,
 }
 
 fn run_fit(args: impl IntoIterator<Item = String>) -> CliResult<()> {
@@ -61,15 +59,8 @@ fn run_fit(args: impl IntoIterator<Item = String>) -> CliResult<()> {
         samples
     };
 
-    let mut options = Options::new()
-        .poles(config.poles)
-        .real_only(config.real_only);
-    if config.weighted {
-        options = options.weight_strategy(WeightStrategy::InverseMagnitude);
-    }
-
     let model = samples
-        .fit(options)
+        .fit(config.options)
         .map_err(|err| format!("fit failed: {err}"))?;
     let json = model
         .to_json()
@@ -92,11 +83,9 @@ fn run_fit(args: impl IntoIterator<Item = String>) -> CliResult<()> {
 fn parse_fit_args(args: impl IntoIterator<Item = String>) -> CliResult<Option<FitConfig>> {
     let mut args = args.into_iter();
     let mut input = None;
-    let mut poles = Options::default().poles;
     let mut matrix = None;
-    let mut real_only = false;
-    let mut weighted = false;
     let mut output = None;
+    let mut options = Options::default();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -108,7 +97,7 @@ fn parse_fit_args(args: impl IntoIterator<Item = String>) -> CliResult<Option<Fi
                 let value = args
                     .next()
                     .ok_or_else(|| "--poles requires a value".to_string())?;
-                poles = parse_positive_usize(&value, "pole count")?;
+                options.poles = parse_positive_usize(&value, "pole count")?;
             }
             "--matrix" => {
                 if matrix.is_some() {
@@ -125,8 +114,17 @@ fn parse_fit_args(args: impl IntoIterator<Item = String>) -> CliResult<Option<Fi
                     parse_positive_usize(&cols, "matrix column count")?,
                 ));
             }
-            "--real-only" => real_only = true,
-            "--weighted" => weighted = true,
+            "--real-only" => options.real_only = true,
+            "--weighted" => options.weight_strategy = WeightStrategy::InverseMagnitude,
+            "--terms" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--terms requires a value".to_string())?;
+                let (fit_constant, fit_proportional) = parse_fit_terms(&value)?;
+                options.fit_constant = fit_constant;
+                options.fit_proportional = fit_proportional;
+            }
+            "--state-space" => options.output = OutputRepresentation::StateSpace,
             "--output" => {
                 if output.is_some() {
                     return Err("--output may only be provided once".to_string());
@@ -149,11 +147,9 @@ fn parse_fit_args(args: impl IntoIterator<Item = String>) -> CliResult<Option<Fi
     let input = input.ok_or_else(|| "missing input file".to_string())?;
     Ok(Some(FitConfig {
         input,
-        poles,
         matrix,
-        real_only,
-        weighted,
         output,
+        options,
     }))
 }
 
@@ -164,12 +160,51 @@ fn parse_positive_usize(value: &str, name: &str) -> CliResult<usize> {
     }
 }
 
+fn parse_fit_terms(value: &str) -> CliResult<(bool, bool)> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "none" | "0" => return Ok((false, false)),
+        "d" => return Ok((true, false)),
+        "e" => return Ok((false, true)),
+        "de" | "ed" => return Ok((true, true)),
+        _ => {}
+    }
+
+    let mut fit_d = false;
+    let mut fit_e = false;
+    let mut saw_term = false;
+    for term in normalized.split(',').map(str::trim) {
+        match term {
+            "d" => {
+                fit_d = true;
+                saw_term = true;
+            }
+            "e" => {
+                fit_e = true;
+                saw_term = true;
+            }
+            _ => {
+                return Err(format!(
+                    "invalid --terms value: {value}; use one of none, d, e, de, d,e"
+                ));
+            }
+        }
+    }
+    if saw_term {
+        Ok((fit_d, fit_e))
+    } else {
+        Err(format!(
+            "invalid --terms value: {value}; use one of none, d, e, de, d,e"
+        ))
+    }
+}
+
 fn print_top_level_help() {
     println!(
         "vecfit {version}
 
 Usage:
-  vecfit fit <input.csv> [--poles N] [--matrix ROWS COLS] [--real-only] [--weighted] [--output model.json]
+  vecfit fit <input.csv> [--poles N] [--matrix ROWS COLS] [--terms TERMS] [--real-only] [--weighted] [--state-space] [--output model.json]
   vecfit --help
   vecfit --version",
         version = env!("CARGO_PKG_VERSION")
@@ -179,13 +214,15 @@ Usage:
 fn print_fit_help() {
     println!(
         "Usage:
-  vecfit fit <input.csv> [--poles N] [--matrix ROWS COLS] [--real-only] [--weighted] [--output model.json]
+  vecfit fit <input.csv> [--poles N] [--matrix ROWS COLS] [--terms TERMS] [--real-only] [--weighted] [--state-space] [--output model.json]
 
 Options:
   --poles N               Number of poles to fit (default: 6)
   --matrix ROWS COLS      Interpret CSV channels as a matrix
+  --terms TERMS           Fit polynomial terms: none, d, e, de, or d,e (default: d)
   --real-only             Constrain fitted poles to the real axis
   --weighted              Use inverse-magnitude sample weighting
+  --state-space           Export a complex modal state-space realization
   --output model.json     Write complex model JSON to a file instead of stdout"
     );
 }
